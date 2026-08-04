@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   RequestGate, TtsState, PollController, reconcileCard, narrationView, captureCardUiState, restoreCardUiState,
-  isCardFromGeneration,
+  selectGenerationCards, syncNarrationControl, activateNarrationControl,
 } = require('../pwa/app-model');
 
 test('request gate aborts the previous selection and rejects stale ownership', () => {
@@ -121,6 +121,26 @@ test('socket synthesis events defer to an active retry response', () => {
   assert.equal(card.ttsUrl, '/response.mp3');
 });
 
+test('malformed ready responses do not consume current retry ownership', () => {
+  const tts = new TtsState();
+  const card = { id: 'card-1', ttsStatus: 'failed', ttsUrl: null, ttsError: 'offline' };
+  const retryToken = tts.beginRetry(card);
+
+  assert.equal(tts.applyReady(card, '   ', { retryToken }).accepted, false);
+  assert.equal(tts.applyReady(card, 'javascript:alert(1)', { retryToken }).accepted, false);
+  assert.equal(tts.hasActiveRetry(card.id), true);
+  assert.equal(card.ttsStatus, 'pending');
+  assert.equal(card.ttsUrl, null);
+
+  assert.deepEqual(
+    tts.applyReady(card, '/api/tts/voice.mp3', { retryToken }),
+    { accepted: true, becameReady: true },
+  );
+  assert.equal(tts.hasActiveRetry(card.id), false);
+  assert.equal(card.ttsStatus, 'ready');
+  assert.equal(card.ttsUrl, '/api/tts/voice.mp3');
+});
+
 test('reconciliation preserves identity, playback state, and monotonic ready synthesis', () => {
   const tts = new TtsState();
   const card = { id: 'card-1', title: 'Old', ttsStatus: 'pending', ttsUrl: null, ttsPlaybackStatus: 'playing' };
@@ -138,6 +158,43 @@ test('reconciliation preserves identity, playback state, and monotonic ready syn
   assert.equal(card.ttsPlaybackStatus, 'playing');
 });
 
+test('a failed event remains terminal when a stale poll snapshot still says pending', () => {
+  const tts = new TtsState();
+  const card = { id: 'card-1', ttsStatus: 'pending', ttsUrl: null, ttsError: null };
+  tts.applyFailed(card, 'provider unavailable');
+
+  reconcileCard(card, {
+    id: 'card-1', ttsStatus: 'pending', ttsUrl: null, ttsError: null,
+  }, tts);
+
+  assert.equal(card.ttsStatus, 'failed');
+  assert.equal(card.ttsUrl, null);
+  assert.equal(card.ttsError, 'provider unavailable');
+});
+
+test('event and poll interleavings preserve terminal state while current retries can resolve', () => {
+  const tts = new TtsState();
+  const card = { id: 'card-1', ttsStatus: 'pending', ttsUrl: null, ttsError: null };
+  tts.applyReady(card, '/event-ready.mp3');
+  reconcileCard(card, { id: 'card-1', ttsStatus: 'pending', ttsUrl: null }, tts);
+  assert.equal(card.ttsStatus, 'ready');
+  assert.equal(card.ttsUrl, '/event-ready.mp3');
+
+  const failedRetry = tts.beginRetry(card);
+  assert.equal(card.ttsStatus, 'pending');
+  reconcileCard(card, { id: 'card-1', ttsStatus: 'ready', ttsUrl: '/stale.mp3' }, tts);
+  assert.equal(card.ttsStatus, 'pending');
+  assert.equal(tts.applyFailed(card, 'retry failed', { retryToken: failedRetry }).accepted, true);
+  reconcileCard(card, { id: 'card-1', ttsStatus: 'pending', ttsUrl: null }, tts);
+  assert.equal(card.ttsStatus, 'failed');
+  assert.equal(card.ttsError, 'retry failed');
+
+  const readyRetry = tts.beginRetry(card);
+  assert.equal(tts.applyReady(card, '/retry-ready.mp3', { retryToken: readyRetry }).accepted, true);
+  assert.equal(card.ttsStatus, 'ready');
+  assert.equal(card.ttsUrl, '/retry-ready.mp3');
+});
+
 test('narration view distinguishes synthesis retry from playback replay', () => {
   assert.deepEqual(
     narrationView({ ttsStatus: 'failed', ttsUrl: null, ttsPlaybackStatus: 'failed' }),
@@ -147,6 +204,36 @@ test('narration view distinguishes synthesis retry from playback replay', () => 
     narrationView({ ttsStatus: 'ready', ttsUrl: '/voice.mp3', ttsPlaybackStatus: 'failed' }),
     { label: '重新播放推荐语', disabled: false, action: 'play', statusText: '推荐语播放失败' },
   );
+});
+
+test('narration control keeps focus and ignores activation while aria-disabled', () => {
+  const document = { activeElement: null };
+  const attributes = new Map();
+  const control = {
+    disabled: false,
+    textContent: '',
+    setAttribute(name, value) { attributes.set(name, String(value)); },
+    getAttribute(name) { return attributes.get(name) || null; },
+    focus() { document.activeElement = this; },
+  };
+  const card = { id: 'card-1', ttsStatus: 'ready', ttsUrl: '/voice.mp3', ttsPlaybackStatus: 'ready' };
+  const calls = [];
+
+  syncNarrationControl(control, narrationView(card));
+  control.focus();
+  card.ttsPlaybackStatus = 'playing';
+  syncNarrationControl(control, narrationView(card));
+  const activated = activateNarrationControl(card, {
+    play: () => calls.push('play'),
+    retry: () => calls.push('retry'),
+  });
+
+  assert.equal(document.activeElement, control);
+  assert.equal(control.disabled, false);
+  assert.equal(control.getAttribute('aria-disabled'), 'true');
+  assert.equal(control.textContent, '正在播放推荐语');
+  assert.equal(activated, false);
+  assert.deepEqual(calls, []);
 });
 
 test('poll controller retries with backoff and completes after a later success', async () => {
@@ -246,10 +333,24 @@ test('card UI capture and restore preserves open, expanded, and focused controls
   assert.equal(document.activeElement, after.narration);
 });
 
-test('generation matching rejects restored history while accepting a new card', () => {
-  const startedAt = Date.parse('2026-08-05T10:00:00.000Z');
+test('failed hydration never attributes a recently created historical card to fallback generation', () => {
+  const historical = {
+    id: 'old-card', createdAt: '2026-08-05T09:59:57.000Z', ttsStatus: 'ready', ttsUrl: '/old.mp3',
+  };
 
-  assert.equal(isCardFromGeneration({ createdAt: '2026-08-05T09:59:40.000Z' }, startedAt), false);
-  assert.equal(isCardFromGeneration({ createdAt: '2026-08-05T10:00:01.000Z' }, startedAt), true);
-  assert.equal(isCardFromGeneration({ createdAt: 'invalid' }, startedAt), false);
+  assert.equal(typeof selectGenerationCards, 'function');
+  assert.deepEqual(selectGenerationCards([historical], { historyHydrated: false }), []);
+});
+
+test('failed hydration renders a newly observed ready card as manual-only', () => {
+  const readyCard = {
+    id: 'new-card', createdAt: '2026-08-05T10:00:01.000Z', ttsStatus: 'ready', ttsUrl: '/new.mp3',
+  };
+
+  assert.equal(typeof selectGenerationCards, 'function');
+  assert.deepEqual(selectGenerationCards([readyCard], { historyHydrated: false }), []);
+  assert.deepEqual(narrationView(readyCard), {
+    label: '播放推荐语', disabled: false, action: 'play', statusText: '推荐语已就绪',
+  });
+  assert.deepEqual(selectGenerationCards([readyCard], { historyHydrated: true }), [readyCard]);
 });

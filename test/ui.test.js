@@ -136,13 +136,15 @@ test('generation fallback polling is bounded and always unwedge the form on exha
   assert.doesNotMatch(app, /pollTimer\s*=\s*setTimeout\(refreshCards/);
 });
 
-test('fallback polling excludes restored history from the active generation', () => {
+test('fallback polling requires a successful history baseline before selecting an autoplay card', () => {
   const app = read('pwa/app.js');
   const poll = app.slice(app.indexOf('async function pollGeneration()'), app.indexOf('function finishPolledGeneration'));
+  const initialize = app.slice(app.indexOf('async function initialize()'), app.indexOf("document.addEventListener('click'"));
 
-  assert.match(app, /generationStartedAt:\s*null/);
-  assert.match(app, /state\.generationStartedAt = Date\.now\(\)/);
-  assert.match(poll, /newCards\.filter\(card => isCardFromGeneration\(card, state\.generationStartedAt\)\)/);
+  assert.match(app, /historyHydrated:\s*false/);
+  assert.match(initialize, /results\[2\]\.status === ['"]fulfilled['"][\s\S]*state\.historyHydrated = true/);
+  assert.match(poll, /reconcileSnapshots\(cards\)[\s\S]*selectGenerationCards\(newCards, \{ historyHydrated: state\.historyHydrated \}\)[\s\S]*renderCards\(\)/);
+  assert.doesNotMatch(app, /generationStartedAt|isCardFromGeneration/);
 });
 
 test('narration transitions update one keyed card in place with a live status', () => {
@@ -158,6 +160,22 @@ test('narration transitions update one keyed card in place with a live status', 
   assert.match(updater, /narrationView\(card\)[\s\S]*narration-status[\s\S]*narration-control/);
   assert.doesNotMatch(callback, /renderCards\(/);
   assert.doesNotMatch(ready, /renderCards\(/);
+});
+
+test('narration controls use aria-disabled without evicting browser focus', () => {
+  const app = read('pwa/app.js');
+  const appModel = read('pwa/app-model.js');
+  const styles = read('pwa/styles.css');
+  const card = app.slice(app.indexOf('function createCard(card)'), app.indexOf('function syncTrackExpansion'));
+  const updater = app.slice(app.indexOf('function updateNarrationCard(card)'), app.indexOf('function renderCards()'));
+
+  assert.match(card, /syncNarrationControl\(speak, view\)/);
+  assert.match(card, /activateNarrationControl\(card,/);
+  assert.match(updater, /syncNarrationControl\(control, view\)/);
+  assert.doesNotMatch(card, /speak\.disabled\s*=/);
+  assert.doesNotMatch(updater, /control\.disabled\s*=/);
+  assert.match(appModel, /setAttribute\(['"]aria-disabled['"], String\(view\.disabled\)\)/);
+  assert.match(styles, /\.card-followups button\[aria-disabled=['"]true['"]\]/);
 });
 
 test('structural card rendering captures and restores focus, rationale, and expansion', () => {

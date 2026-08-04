@@ -3,7 +3,7 @@
 
   const {
     RequestGate, TtsState, PollController, reconcileCard, narrationView, captureCardUiState, restoreCardUiState,
-    isCardFromGeneration,
+    selectGenerationCards, syncNarrationControl, activateNarrationControl,
   } = window.ThisMomentAppModel;
   const $ = selector => document.querySelector(selector);
   const elements = {
@@ -25,7 +25,7 @@
   const state = {
     cards: new Map(), presets: [], generating: false, socket: null, toastTimer: null,
     pendingEnvironment: null, automaticEnvironment: null, hydrating: true, queuedSocketEvents: [],
-    generationStartedAt: null,
+    historyHydrated: false,
   };
   const narration = new window.NarrationController({
     createAudio: url => new Audio(url),
@@ -335,7 +335,7 @@
 
     const actions = document.createElement('div'); actions.className = 'card-followups';
     const speak = staticButton(view.label, 'secondary-action narration-control');
-    speak.disabled = view.disabled;
+    syncNarrationControl(speak, view);
     speak.dataset.uiKey = 'narration';
     const refine = staticButton('再轻松一点', 'text-action');
     refine.dataset.uiKey = 'refine';
@@ -363,9 +363,10 @@
   }
 
   function handleNarrationAction(card) {
-    const view = narrationView(card);
-    if (view.action === 'retry') void retryTts(card);
-    if (view.action === 'play') void narration.play(card);
+    activateNarrationControl(card, {
+      retry: () => { void retryTts(card); },
+      play: () => { void narration.play(card); },
+    });
   }
 
   function syncTrackExpansion(button, expanded) {
@@ -388,10 +389,7 @@
     const status = element.querySelector('.narration-status');
     const control = element.querySelector('.narration-control');
     if (status) status.textContent = `${card.tracks.length} 首 · ${view.statusText}`;
-    if (control) {
-      control.textContent = view.label;
-      control.disabled = view.disabled;
-    }
+    if (control) syncNarrationControl(control, view);
   }
 
   function renderCards() {
@@ -443,7 +441,6 @@
     state.pendingEnvironment = submittedEnvironment;
     elements.pendingMessage.textContent = userInput;
     elements.pendingMeta.textContent = environmentMeta(submittedEnvironment);
-    state.generationStartedAt = Date.now();
     state.generating = true; elements.send.disabled = true;
     progress({ stage: 'understanding', label: '理解这一刻', progress: 18 });
     try {
@@ -463,7 +460,7 @@
     if (!state.generating) return { done: true, value: null };
     const { cards } = await api(`/api/cards?sessionId=${encodeURIComponent(sessionId)}`);
     const newCards = reconcileSnapshots(cards);
-    const generationCards = newCards.filter(card => isCardFromGeneration(card, state.generationStartedAt));
+    const generationCards = selectGenerationCards(newCards, { historyHydrated: state.historyHydrated });
     renderCards();
     return { done: generationCards.length > 0, value: generationCards };
   }
@@ -674,6 +671,7 @@
     if (results[1].status === 'fulfilled') { state.presets = results[1].value.presets; renderPresets(); }
     if (results[2].status === 'fulfilled') {
       reconcileSnapshots(results[2].value.cards);
+      state.historyHydrated = true;
       state.cards.forEach(card => {
         if (card.ttsStatus === 'ready' && card.ttsUrl) ttsState.applyReady(card, card.ttsUrl);
       });

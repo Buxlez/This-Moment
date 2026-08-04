@@ -78,13 +78,14 @@
     }
 
     applyReady(card, ttsUrl, { retryToken } = {}) {
+      const safeTtsUrl = normalizeTtsUrl(ttsUrl);
+      if (!safeTtsUrl) return { accepted: false, becameReady: false };
       if (!this.acceptSource(card, retryToken)) return { accepted: false, becameReady: false };
-      if (!ttsUrl) return { accepted: false, becameReady: false };
       const cardId = String(card.id);
-      const becameReady = this.readyUrls.get(cardId) !== ttsUrl;
-      this.readyUrls.set(cardId, ttsUrl);
+      const becameReady = this.readyUrls.get(cardId) !== safeTtsUrl;
+      this.readyUrls.set(cardId, safeTtsUrl);
       card.ttsStatus = 'ready';
-      card.ttsUrl = ttsUrl;
+      card.ttsUrl = safeTtsUrl;
       card.ttsError = null;
       return { accepted: true, becameReady };
     }
@@ -115,6 +116,17 @@
         return true;
       }
       return !this.hasActiveRetry(cardId);
+    }
+  }
+
+  function normalizeTtsUrl(value) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    const candidate = value.trim();
+    try {
+      const parsed = new URL(candidate, 'https://this-moment.invalid');
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? candidate : null;
+    } catch (_error) {
+      return null;
     }
   }
 
@@ -198,7 +210,7 @@
     if (!snapshot || ttsState.hasActiveRetry(existing.id) || !Object.hasOwn(snapshot, 'ttsStatus')) return existing;
     if (snapshot.ttsStatus === 'ready' && snapshot.ttsUrl) {
       ttsState.applyReady(existing, snapshot.ttsUrl);
-    } else if (existing.ttsStatus !== 'ready') {
+    } else if (existing.ttsStatus !== 'ready' && existing.ttsStatus !== 'failed') {
       existing.ttsStatus = snapshot.ttsStatus;
       existing.ttsUrl = snapshot.ttsUrl || null;
       existing.ttsError = snapshot.ttsError || null;
@@ -223,6 +235,19 @@
       return { label: '播放推荐语', disabled: false, action: 'play', statusText: '推荐语已就绪' };
     }
     return { label: '推荐语生成中', disabled: true, action: null, statusText: '推荐语生成中' };
+  }
+
+  function syncNarrationControl(control, view) {
+    control.textContent = view.label;
+    control.setAttribute('aria-disabled', String(view.disabled));
+  }
+
+  function activateNarrationControl(card, { play = () => {}, retry = () => {} } = {}) {
+    const view = narrationView(card);
+    if (view.disabled || !view.action) return false;
+    if (view.action === 'play') play(card);
+    if (view.action === 'retry') retry(card);
+    return true;
   }
 
   function captureCardUiState(root) {
@@ -264,15 +289,12 @@
     target?.focus?.();
   }
 
-  function isCardFromGeneration(card, startedAt, toleranceMs = 5000) {
-    const createdAt = Date.parse(card?.createdAt);
-    return Number.isFinite(createdAt)
-      && Number.isFinite(startedAt)
-      && createdAt >= startedAt - toleranceMs;
+  function selectGenerationCards(cards, { historyHydrated } = {}) {
+    return historyHydrated ? [...(cards || [])] : [];
   }
 
   return {
     RequestGate, TtsState, PollController, reconcileCard, narrationView, captureCardUiState, restoreCardUiState,
-    isCardFromGeneration,
+    selectGenerationCards, syncNarrationControl, activateNarrationControl,
   };
 }));

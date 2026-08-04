@@ -180,7 +180,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .card-followups { margin: 10px 0 0 44px; display: flex; align-items: center; gap: 8px; }
 .card-followups button { min-height: 36px; padding: 0 13px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font-size: 10px; cursor: pointer; }
 .card-followups button:hover { border-color: var(--accent-violet); color: var(--accent-violet-dark); }
-.card-followups button:disabled { border-color: var(--line); color: var(--quiet); cursor: default; }
+.card-followups button:disabled, .card-followups button[aria-disabled="true"] { border-color: var(--line); color: var(--quiet); cursor: default; }
 .recommendation-reason { margin: 10px 0 0 44px; border-top: 1px solid var(--line); }
 .recommendation-reason summary { width: max-content; min-height: 42px; display: flex; align-items: center; gap: 6px; list-style: none; color: var(--muted); font-size: 10px; cursor: pointer; }
 .recommendation-reason summary::-webkit-details-marker { display: none; }
