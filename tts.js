@@ -5,6 +5,7 @@ const https = require('https');
 
 const CACHE_DIR = path.join(__dirname, 'cache/tts');
 fs.mkdirSync(CACHE_DIR, { recursive: true });
+const activeSynthesis = new Map();
 
 const VOLCENGINE_DEFAULT_ENDPOINT = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
 
@@ -83,34 +84,75 @@ function md5(text) {
 function cachePath(text, provider = process.env.TTS_PROVIDER || 'volcengine', options = {}) {
   const voice = getVoiceForProvider(provider, options);
   const role = options.role || 'station';
-  return path.join(CACHE_DIR, `${md5(`${role}:${provider}:${voice}:${text}`)}.mp3`);
+  const cacheDir = path.resolve(options.cacheDir || CACHE_DIR);
+  fs.mkdirSync(cacheDir, { recursive: true });
+  return path.join(cacheDir, `${md5(`${role}:${provider}:${voice}:${text}`)}.mp3`);
 }
 
 function synthesize(text, options = {}) {
   const provider = options.provider || process.env.TTS_PROVIDER || 'volcengine';
   const cached = cachePath(text, provider, options);
-  if (fs.existsSync(cached)) {
+  if (isUsableCache(cached)) {
     console.log(`[TTS] 缓存命中 → ${path.basename(cached)}`);
     return Promise.resolve(cached);
   }
+
+  const active = activeSynthesis.get(cached);
+  if (active) return active;
 
   const preview = text.slice(0, 40) + (text.length > 40 ? '…' : '');
   console.log(`[TTS] 合成中 (${provider}${options.role ? `/${options.role}` : ''})："${preview}"`);
   const startAt = Date.now();
 
-  let promise;
-  if (provider === 'volcengine') {
-    promise = synthesizeVolcengine(text, cached, options);
-  } else if (provider === 'fish') {
-    promise = synthesizeFish(text, cached, options);
-  } else {
-    promise = synthesizeKokoro(text, cached, options);
-  }
+  const synthesis = (async () => {
+    try {
+      if (provider === 'volcengine') {
+        await synthesizeVolcengine(text, cached, options);
+      } else if (provider === 'fish') {
+        await synthesizeFish(text, cached, options);
+      } else {
+        await synthesizeKokoro(text, cached, options);
+      }
 
-  return promise.then(p => {
-    console.log(`[TTS] 完成 (${((Date.now() - startAt) / 1000).toFixed(1)}s) → ${path.basename(p)}`);
-    return p;
+      if (!isUsableCache(cached)) {
+        throw new Error(`${provider} TTS did not produce a usable audio cache file`);
+      }
+
+      console.log(`[TTS] 完成 (${((Date.now() - startAt) / 1000).toFixed(1)}s) → ${path.basename(cached)}`);
+      return cached;
+    } catch (error) {
+      removeCacheFile(cached);
+      throw error;
+    }
   });
+
+  let pending;
+  pending = synthesis().finally(() => {
+    if (activeSynthesis.get(cached) === pending) {
+      activeSynthesis.delete(cached);
+    }
+  });
+  activeSynthesis.set(cached, pending);
+  return pending;
+}
+
+function isUsableCache(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    return stats.isFile() && stats.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function removeCacheFile(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.warn(`[TTS] 无法清理失败的缓存文件 → ${path.basename(filePath)}`);
+    }
+  }
 }
 
 function getVoiceForProvider(provider, options = {}) {
@@ -148,43 +190,35 @@ function buildVolcenginePayload(text, options = {}) {
   };
 }
 
-function extractJsonObjects(text) {
-  const objects = [];
-  let depth = 0;
-  let start = -1;
-  let inString = false;
-  let escaped = false;
+function boundedVolcengineDetail(value) {
+  return String(value == null ? '' : value).slice(0, 2000);
+}
 
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
+function collectVolcengineAudio(line, audioChunks) {
+  const trimmed = line.trim();
+  if (!trimmed) return;
 
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch === '\\') {
-        escaped = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
+  let msg;
+  try {
+    msg = JSON.parse(trimmed);
+  } catch (error) {
+    throw new Error(
+      `Volcengine TTS returned invalid streaming JSON: ${boundedVolcengineDetail(error.message)}`
+    );
+  }
 
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === '{') {
-      if (depth === 0) start = i;
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0 && start !== -1) {
-        objects.push(text.slice(start, i + 1));
-        start = -1;
-      }
+  if (msg.code != null) {
+    const code = Number(msg.code);
+    if (code !== 0 && code !== 20000000) {
+      const detail = boundedVolcengineDetail(`${msg.code}: ${msg.message || ''}`);
+      throw new Error(`Volcengine TTS response error ${detail}`);
     }
   }
 
-  const rest = depth > 0 && start !== -1 ? text.slice(start) : '';
-  return { objects, rest };
+  if (typeof msg.data === 'string' && msg.data) {
+    const audio = Buffer.from(msg.data, 'base64');
+    if (audio.length > 0) audioChunks.push(audio);
+  }
 }
 
 async function synthesizeVolcengine(text, outPath, options = {}) {
@@ -192,48 +226,51 @@ async function synthesizeVolcengine(text, outPath, options = {}) {
   validateVolcengineEndpoint(endpoint);
   const headers = buildVolcengineHeaders(options);
   const fetchImpl = options.fetchImpl || fetch;
-  const res = await fetchImpl(endpoint, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(buildVolcenginePayload(text, options)),
-  });
+  let res;
+  try {
+    res = await fetchImpl(endpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(buildVolcenginePayload(text, options)),
+    });
+  } catch (error) {
+    throw new Error(
+      `Volcengine TTS request failed: ${boundedVolcengineDetail(error && error.message ? error.message : error)}`
+    );
+  }
 
   if (!res.ok) {
     const err = await res.text().catch(() => '');
-    throw new Error(`Volcengine TTS error ${res.status}: ${err}`);
+    const detail = boundedVolcengineDetail(`${res.status}: ${err}`);
+    throw new Error(`Volcengine TTS error ${detail}`);
   }
 
   const audioChunks = [];
   let buffer = '';
   const decoder = new TextDecoder();
 
-  for await (const chunk of res.body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const parsed = extractJsonObjects(buffer);
-    buffer = parsed.rest;
+  const iterator = res.body[Symbol.asyncIterator]();
+  while (true) {
+    let part;
+    try {
+      part = await iterator.next();
+    } catch (error) {
+      throw new Error(
+        `Volcengine TTS stream failed: ${boundedVolcengineDetail(error && error.message ? error.message : error)}`
+      );
+    }
+    if (part.done) break;
 
-    for (const raw of parsed.objects) {
-      const msg = JSON.parse(raw);
-      if (msg.code && msg.code !== 20000000) {
-        throw new Error(`Volcengine TTS response error ${msg.code}: ${msg.message || ''}`);
-      }
-      if (msg.data) {
-        audioChunks.push(Buffer.from(msg.data, 'base64'));
-      }
+    buffer += decoder.decode(part.value, { stream: true });
+    let newlineIndex;
+    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+      collectVolcengineAudio(buffer.slice(0, newlineIndex), audioChunks);
+      buffer = buffer.slice(newlineIndex + 1);
     }
   }
 
   buffer += decoder.decode();
-  const parsed = extractJsonObjects(buffer);
-  for (const raw of parsed.objects) {
-    const msg = JSON.parse(raw);
-    if (msg.code && msg.code !== 20000000) {
-      throw new Error(`Volcengine TTS response error ${msg.code}: ${msg.message || ''}`);
-    }
-    if (msg.data) {
-      audioChunks.push(Buffer.from(msg.data, 'base64'));
-    }
-  }
+  collectVolcengineAudio(buffer, audioChunks);
 
   if (!audioChunks.length) {
     throw new Error('Volcengine TTS returned no audio data');
