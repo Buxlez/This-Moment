@@ -8,6 +8,64 @@ fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 const VOLCENGINE_DEFAULT_ENDPOINT = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
 
+function volcengineValue(options, optionName, envName) {
+  return options[optionName] || process.env[envName] || '';
+}
+
+function validateVolcengineEndpoint(value = VOLCENGINE_DEFAULT_ENDPOINT) {
+  const url = new URL(value);
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== 'openspeech.bytedance.com' ||
+    url.pathname !== '/api/v3/tts/unidirectional'
+  ) {
+    throw new Error('Volcengine TTS credentials may only be sent to the official HTTPS endpoint.');
+  }
+  return true;
+}
+
+function buildVolcengineHeaders(options = {}) {
+  const apiKey = volcengineValue(options, 'apiKey', 'VOLCENGINE_TTS_API_KEY');
+  const appId = volcengineValue(options, 'appId', 'VOLCENGINE_TTS_APP_ID');
+  const accessToken = volcengineValue(options, 'accessToken', 'VOLCENGINE_TTS_ACCESS_TOKEN');
+  const resourceId = volcengineValue(options, 'resourceId', 'VOLCENGINE_TTS_RESOURCE_ID');
+  const requestId = volcengineValue(options, 'requestId', 'VOLCENGINE_TTS_REQUEST_ID') || crypto.randomUUID();
+
+  if (!resourceId) {
+    throw new Error('VOLCENGINE_TTS_RESOURCE_ID not set');
+  }
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Api-Resource-Id': resourceId,
+    'X-Api-Request-Id': requestId,
+    'Connection': 'keep-alive',
+  };
+
+  if (apiKey) {
+    headers['X-Api-Key'] = apiKey;
+  } else if (appId && accessToken) {
+    headers['X-Api-App-Id'] = appId;
+    headers['X-Api-Access-Key'] = accessToken;
+  } else {
+    throw new Error(
+      'Volcengine TTS credentials not set: provide VOLCENGINE_TTS_API_KEY or both VOLCENGINE_TTS_APP_ID and VOLCENGINE_TTS_ACCESS_TOKEN'
+    );
+  }
+
+  return headers;
+}
+
+function isVolcengineConfigured(options = {}) {
+  const apiKey = volcengineValue(options, 'apiKey', 'VOLCENGINE_TTS_API_KEY');
+  const appId = volcengineValue(options, 'appId', 'VOLCENGINE_TTS_APP_ID');
+  const accessToken = volcengineValue(options, 'accessToken', 'VOLCENGINE_TTS_ACCESS_TOKEN');
+  const resourceId = volcengineValue(options, 'resourceId', 'VOLCENGINE_TTS_RESOURCE_ID');
+  const voiceType = volcengineValue(options, 'voiceType', 'VOLCENGINE_TTS_VOICE_TYPE');
+
+  return Boolean(resourceId && voiceType && (apiKey || (appId && accessToken)));
+}
+
 function md5(text) {
   return crypto.createHash('md5').update(text).digest('hex');
 }
@@ -120,23 +178,13 @@ function extractJsonObjects(text) {
 }
 
 async function synthesizeVolcengine(text, outPath, options = {}) {
-  const apiKey = options.apiKey || process.env.VOLCENGINE_TTS_API_KEY;
-  const resourceId = options.resourceId || process.env.VOLCENGINE_TTS_RESOURCE_ID;
-
-  if (!apiKey || !resourceId) {
-    throw new Error('VOLCENGINE_TTS_API_KEY or VOLCENGINE_TTS_RESOURCE_ID not set');
-  }
-
   const endpoint = options.endpoint || process.env.VOLCENGINE_TTS_ENDPOINT || VOLCENGINE_DEFAULT_ENDPOINT;
-  const res = await fetch(endpoint, {
+  validateVolcengineEndpoint(endpoint);
+  const headers = buildVolcengineHeaders(options);
+  const fetchImpl = options.fetchImpl || fetch;
+  const res = await fetchImpl(endpoint, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Api-Key': apiKey,
-      'X-Api-Resource-Id': resourceId,
-      'X-Api-Request-Id': crypto.randomUUID(),
-      'Connection': 'keep-alive',
-    },
+    headers,
     body: JSON.stringify(buildVolcenginePayload(text, options)),
   });
 
@@ -257,4 +305,10 @@ async function synthesizeKokoro(text, outPath, options = {}) {
   return outPath;
 }
 
-module.exports = { synthesize, cachePath };
+module.exports = {
+  synthesize,
+  cachePath,
+  buildVolcengineHeaders,
+  isVolcengineConfigured,
+  validateVolcengineEndpoint,
+};
