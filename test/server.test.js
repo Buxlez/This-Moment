@@ -10,6 +10,8 @@ const { createApp } = require('../server');
 const defaultTts = require('../tts');
 
 const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
+const HASHED_MP3 = '0123456789abcdef0123456789abcdef.mp3';
+const OTHER_HASHED_MP3 = 'abcdef0123456789abcdef0123456789.mp3';
 
 function fakeCard(sessionId = 's1') {
   return {
@@ -42,6 +44,44 @@ function serverDependencies(overrides = {}) {
 async function listen(instance) {
   await new Promise(resolve => instance.server.listen(0, '127.0.0.1', resolve));
   return `http://127.0.0.1:${instance.server.address().port}`;
+}
+
+function waitForSocketEvent(socket, predicate) {
+  return new Promise((resolve, reject) => {
+    const onMessage = data => {
+      let event;
+      try {
+        event = JSON.parse(data.toString());
+      } catch (error) {
+        cleanup();
+        reject(error);
+        return;
+      }
+      if (!predicate(event)) return;
+      cleanup();
+      resolve(event);
+    };
+    const onError = error => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      socket.off('message', onMessage);
+      socket.off('error', onError);
+    };
+    socket.on('message', onMessage);
+    socket.on('error', onError);
+  });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function configuredFromIsolatedEnvironment(environment) {
@@ -140,14 +180,66 @@ test('unconfigured TTS uses the public fallback only in demo mode', async t => {
   assert.equal(injected.dependencies.tts, injectedTts);
 });
 
+test('queued generation failures broadcast only fixed public copy', async t => {
+  const upstreamDetail = 'provider 401 token=credential-fragment X-Api-Key /private/model/error.json';
+  const instance = createApp(serverDependencies({
+    pipeline: { generate: async () => { throw new Error(upstreamDetail); } },
+  }));
+  const base = await listen(instance);
+  t.after(() => instance.close());
+
+  const socket = new WebSocket(`${base.replace('http', 'ws')}/stream?sessionId=failure-session`);
+  t.after(() => socket.close());
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  const failedEvent = waitForSocketEvent(socket, event => event.type === 'failed');
+
+  const response = await fetch(`${base}/api/recommendations`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ sessionId: 'failure-session', userInput: '来点音乐' }),
+  });
+  const body = await response.json();
+  const event = await failedEvent;
+  const publicPayload = JSON.stringify({ body, event });
+
+  assert.equal(response.status, 202);
+  assert.deepEqual(event, {
+    type: 'failed', sessionId: 'failure-session', jobId: body.jobId,
+    error: '生成失败，请稍后重试。',
+  });
+  assert.equal(publicPayload.includes(upstreamDetail), false);
+  assert.doesNotMatch(publicPayload, /credential-fragment|X-Api-Key|\/private\/model|provider 401/);
+});
+
+test('internally created pipeline receives the configured artifact trust boundary', t => {
+  const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-pipeline-cache-test-'));
+  t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
+  let instance;
+
+  assert.doesNotThrow(() => {
+    instance = createApp(serverDependencies({
+      pipeline: undefined,
+      llm: { generatePlan: async () => { throw new Error('unused'); } },
+      tts: { synthesize: async () => { throw new Error('unused'); } },
+      ttsCacheDir,
+    }));
+  });
+  t.after(() => instance?.close());
+
+  assert.equal(instance.dependencies.pipeline.dependencies.ttsArtifact.root, path.resolve(ttsCacheDir));
+});
+
 test('TTS retry publishes one ready update and returns a servable MP3 URL', async t => {
   const card = fakeCard('retry-session');
   const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-tts-cache-test-'));
   const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x54, 0x54, 0x53]);
-  const audioPath = path.join(ttsCacheDir, 'retry_voice.mp3');
+  const audioPath = path.join(ttsCacheDir, HASHED_MP3);
   fs.writeFileSync(audioPath, audio);
   t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
   const updates = [];
+  let synthesisOptions;
   const repository = {
     listCards: () => [card],
     getCard: id => id === card.id ? card : null,
@@ -164,7 +256,12 @@ test('TTS retry publishes one ready update and returns a servable MP3 URL', asyn
     repository,
     ttsConfigured: true,
     ttsCacheDir,
-    tts: { synthesize: async () => audioPath },
+    tts: {
+      synthesize: async (_text, options) => {
+        synthesisOptions = options;
+        return audioPath;
+      },
+    },
   }));
   const base = await listen(instance);
   t.after(() => instance.close());
@@ -183,19 +280,206 @@ test('TTS retry publishes one ready update and returns a servable MP3 URL', asyn
   await new Promise(resolve => setTimeout(resolve, 20));
 
   assert.equal(response.status, 200);
-  assert.deepEqual(result, { ttsStatus: 'ready', ttsUrl: '/api/tts/retry_voice.mp3' });
-  assert.deepEqual(updates, [{ status: 'ready', url: '/api/tts/retry_voice.mp3', error: null }]);
+  assert.deepEqual(result, { ttsStatus: 'ready', ttsUrl: `/api/tts/${HASHED_MP3}` });
+  assert.deepEqual(updates, [
+    { status: 'pending', url: null, error: null },
+    { status: 'ready', url: `/api/tts/${HASHED_MP3}`, error: null },
+  ]);
   assert.equal(card.ttsStatus, 'ready');
-  assert.equal(card.ttsUrl, '/api/tts/retry_voice.mp3');
+  assert.equal(card.ttsUrl, `/api/tts/${HASHED_MP3}`);
+  assert.deepEqual(synthesisOptions, {
+    role: 'recommendation', cacheDir: path.resolve(ttsCacheDir),
+  });
   assert.deepEqual(events.filter(event => event.type === 'tts-ready'), [{
     type: 'tts-ready', sessionId: 'retry-session', cardId: 'card-1',
-    ttsUrl: '/api/tts/retry_voice.mp3',
+    ttsUrl: `/api/tts/${HASHED_MP3}`,
   }]);
 
   const audioResponse = await fetch(`${base}${result.ttsUrl}`);
   assert.equal(audioResponse.status, 200);
   assert.equal(audioResponse.headers.get('content-type'), 'audio/mpeg');
+  assert.equal(audioResponse.headers.get('x-content-type-options'), 'nosniff');
+  assert.match(audioResponse.headers.get('cache-control') || '', /immutable/);
   assert.deepEqual(Buffer.from(await audioResponse.arrayBuffer()), audio);
+});
+
+test('retry and serving reject untrusted artifact names, paths, contents, and symlinks', async t => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'server-artifact-security-test-'));
+  const ttsCacheDir = path.join(parent, 'cache');
+  fs.mkdirSync(ttsCacheDir);
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+
+  const textPath = path.join(ttsCacheDir, HASHED_MP3);
+  const outsidePath = path.join(parent, OTHER_HASHED_MP3);
+  const symlinkPath = path.join(ttsCacheDir, OTHER_HASHED_MP3);
+  const arbitraryPath = path.join(ttsCacheDir, 'retry_voice.mp3');
+  fs.writeFileSync(textPath, Buffer.from('not audio'));
+  fs.writeFileSync(outsidePath, Buffer.from('ID3-outside'));
+  fs.writeFileSync(arbitraryPath, Buffer.from('ID3-arbitrary'));
+  fs.symlinkSync(outsidePath, symlinkPath);
+
+  const card = fakeCard('security-session');
+  const updates = [];
+  let synthesizedPath = outsidePath;
+  const repository = {
+    listCards: () => [card],
+    getCard: id => id === card.id ? card : null,
+    updateTts: (_id, update) => updates.push(update),
+    recordPlayEvent: () => {},
+  };
+  const instance = createApp(serverDependencies({
+    card, repository, ttsCacheDir, ttsConfigured: true,
+    tts: { synthesize: async () => synthesizedPath },
+  }));
+  const base = await listen(instance);
+  t.after(() => instance.close());
+
+  let response = await fetch(`${base}/api/tts/${HASHED_MP3}`);
+  assert.equal(response.status, 404);
+  response = await fetch(`${base}/api/tts/${OTHER_HASHED_MP3}`);
+  assert.equal(response.status, 404);
+  response = await fetch(`${base}/api/tts/retry_voice.mp3`);
+  assert.equal(response.status, 400);
+  response = await fetch(`${base}/api/tts/%2e%2e%2fREADME.md`);
+  assert.notEqual(response.status, 200);
+
+  response = await fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: PUBLIC_TTS_ERROR });
+
+  synthesizedPath = arbitraryPath;
+  response = await fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: PUBLIC_TTS_ERROR });
+  assert.equal(updates.filter(update => update.status === 'failed')
+    .every(update => update.error === PUBLIC_TTS_ERROR), true);
+});
+
+test('concurrent successful retries share one attempt and later retry runs after cleanup', async t => {
+  const card = fakeCard('concurrent-session');
+  const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-retry-concurrency-test-'));
+  const audioPath = path.join(ttsCacheDir, HASHED_MP3);
+  fs.writeFileSync(audioPath, Buffer.from('ID3-concurrent'));
+  t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
+  const updates = [];
+  let synthCalls = 0;
+  let getCardCalls = 0;
+  let followerReachedResolve;
+  const followerReached = new Promise(resolve => { followerReachedResolve = resolve; });
+  let firstStartedResolve;
+  const firstStarted = new Promise(resolve => { firstStartedResolve = resolve; });
+  const releaseFirst = deferred();
+  const repository = {
+    listCards: () => [card],
+    getCard: id => {
+      getCardCalls += 1;
+      if (getCardCalls === 2) followerReachedResolve();
+      return id === card.id ? card : null;
+    },
+    updateTts: (_id, update) => updates.push(update),
+    recordPlayEvent: () => {},
+  };
+  const instance = createApp(serverDependencies({
+    card, repository, ttsCacheDir, ttsConfigured: true,
+    tts: {
+      async synthesize() {
+        synthCalls += 1;
+        if (synthCalls === 1) {
+          firstStartedResolve();
+          await releaseFirst.promise;
+        }
+        return audioPath;
+      },
+    },
+  }));
+  const base = await listen(instance);
+  t.after(() => instance.close());
+  const events = [];
+  const socket = new WebSocket(`${base.replace('http', 'ws')}/stream?sessionId=concurrent-session`);
+  t.after(() => socket.close());
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  socket.on('message', data => events.push(JSON.parse(data.toString())));
+
+  const firstResponse = fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  await firstStarted;
+  const secondResponse = fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  await followerReached;
+  releaseFirst.resolve();
+  const responses = await Promise.all([firstResponse, secondResponse]);
+  const bodies = await Promise.all(responses.map(response => response.json()));
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(synthCalls, 1);
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+  assert.deepEqual(bodies[0], bodies[1]);
+  assert.deepEqual(updates, [
+    { status: 'pending', url: null, error: null },
+    { status: 'ready', url: `/api/tts/${HASHED_MP3}`, error: null },
+  ]);
+  assert.equal(events.filter(event => event.type === 'tts-ready').length, 1);
+
+  const laterResponse = await fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  assert.equal(laterResponse.status, 200);
+  assert.equal(synthCalls, 2);
+  assert.deepEqual(updates.slice(2), [
+    { status: 'pending', url: null, error: null },
+    { status: 'ready', url: `/api/tts/${HASHED_MP3}`, error: null },
+  ]);
+});
+
+test('concurrent retry cannot let a would-be follower failure overwrite owner success', async t => {
+  const card = fakeCard('owner-session');
+  const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-retry-owner-test-'));
+  const audioPath = path.join(ttsCacheDir, HASHED_MP3);
+  fs.writeFileSync(audioPath, Buffer.from('ID3-owner'));
+  t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
+  const updates = [];
+  let synthCalls = 0;
+  let getCardCalls = 0;
+  let followerReachedResolve;
+  const followerReached = new Promise(resolve => { followerReachedResolve = resolve; });
+  const releaseOwner = deferred();
+  let ownerStartedResolve;
+  const ownerStarted = new Promise(resolve => { ownerStartedResolve = resolve; });
+  const repository = {
+    listCards: () => [card],
+    getCard: id => {
+      getCardCalls += 1;
+      if (getCardCalls === 2) followerReachedResolve();
+      return id === card.id ? card : null;
+    },
+    updateTts: (_id, update) => updates.push(update),
+    recordPlayEvent: () => {},
+  };
+  const instance = createApp(serverDependencies({
+    card, repository, ttsCacheDir, ttsConfigured: true,
+    tts: {
+      async synthesize() {
+        synthCalls += 1;
+        if (synthCalls > 1) throw new Error('follower failure must never run');
+        ownerStartedResolve();
+        await releaseOwner.promise;
+        return audioPath;
+      },
+    },
+  }));
+  const base = await listen(instance);
+  t.after(() => instance.close());
+
+  const firstResponse = fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  await ownerStarted;
+  const secondResponse = fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
+  await followerReached;
+  releaseOwner.resolve();
+  const responses = await Promise.all([firstResponse, secondResponse]);
+
+  assert.equal(synthCalls, 1);
+  assert.deepEqual(responses.map(response => response.status), [200, 200]);
+  assert.deepEqual(updates.map(update => update.status), ['pending', 'ready']);
+  assert.equal(updates.some(update => update.status === 'failed'), false);
 });
 
 test('TTS retry failure returns and stores only the fixed public message', async t => {
@@ -217,13 +501,30 @@ test('TTS retry failure returns and stores only the fixed public message', async
   const base = await listen(instance);
   t.after(() => instance.close());
 
+  const events = [];
+  const socket = new WebSocket(`${base.replace('http', 'ws')}/stream?sessionId=retry-session`);
+  t.after(() => socket.close());
+  await new Promise((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  socket.on('message', data => events.push(JSON.parse(data.toString())));
+
   const response = await fetch(`${base}/api/cards/card-1/tts/retry`, { method: 'POST' });
   const result = await response.json();
+  await new Promise(resolve => setImmediate(resolve));
   const serialized = JSON.stringify({ result, updates });
 
   assert.equal(response.status, 503);
   assert.deepEqual(result, { error: PUBLIC_TTS_ERROR });
-  assert.deepEqual(updates, [{ status: 'failed', error: PUBLIC_TTS_ERROR }]);
+  assert.deepEqual(updates, [
+    { status: 'pending', url: null, error: null },
+    { status: 'failed', url: null, error: PUBLIC_TTS_ERROR },
+  ]);
+  assert.deepEqual(events.filter(event => event.type === 'tts-failed'), [{
+    type: 'tts-failed', sessionId: 'retry-session', cardId: 'card-1',
+    error: PUBLIC_TTS_ERROR,
+  }]);
   assert.equal(serialized.includes(upstreamDetail), false);
   assert.doesNotMatch(serialized, /credential-fragment|X-Api-Access-Key|\/private\/cache|provider 401/);
 });

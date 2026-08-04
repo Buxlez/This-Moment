@@ -1,5 +1,4 @@
 const crypto = require('node:crypto');
-const path = require('node:path');
 const { routeIntent } = require('../domain/intent');
 const { resolveEnvironment } = require('../domain/environment');
 const { validateCandidates } = require('../music/provider');
@@ -7,7 +6,14 @@ const { validateCandidates } = require('../music/provider');
 const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
 
 function createRecommendationPipeline(dependencies) {
-  const { repository, llm, musicProvider, tts, emit = () => {}, now = () => new Date(), progressDelayMs = 0 } = dependencies;
+  const {
+    repository, llm, musicProvider, tts, ttsArtifact,
+    emit = () => {}, now = () => new Date(), progressDelayMs = 0,
+  } = dependencies;
+  if (!ttsArtifact || typeof ttsArtifact.validateArtifactPath !== 'function'
+    || typeof ttsArtifact.root !== 'string') {
+    throw new Error('A TTS artifact validator is required.');
+  }
   const targetTrackCount = Math.max(1, Math.min(Number(dependencies.targetTrackCount || 8), 20));
   const candidateTrackCount = Math.min(targetTrackCount * 4, 40);
   const pauseForProgress = () => progressDelayMs ? new Promise(resolve => setTimeout(resolve, progressDelayMs)) : Promise.resolve();
@@ -62,8 +68,11 @@ function createRecommendationPipeline(dependencies) {
     publish({ type: 'complete', card });
 
     try {
-      const ttsPath = await tts.synthesize(card.description, { role: 'recommendation' });
-      const ttsUrl = `/api/tts/${path.basename(ttsPath)}`;
+      const ttsPath = await tts.synthesize(card.description, {
+        role: 'recommendation', cacheDir: ttsArtifact.root,
+      });
+      const artifact = await ttsArtifact.validateArtifactPath(ttsPath);
+      const ttsUrl = `/api/tts/${artifact.filename}`;
       card.ttsStatus = 'ready';
       card.ttsUrl = ttsUrl;
       repository.updateTts(card.id, { status: 'ready', url: ttsUrl, error: null });

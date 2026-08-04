@@ -1,7 +1,6 @@
 require('dotenv').config();
 
 const crypto = require('node:crypto');
-const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const express = require('express');
@@ -11,10 +10,12 @@ const { createMusicProvider } = require('./src/music/provider');
 const { createLlm } = require('./llm');
 const { createRecommendationPipeline } = require('./src/recommendation/pipeline');
 const defaultTts = require('./tts');
+const { createTtsArtifactStore } = require('./tts-artifact');
 const { resolveCookie, verifyLoginStatus } = require('./netease-session');
 const { resolveOpenMeteoWeather } = require('./src/environment/open-meteo');
 
 const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
+const PUBLIC_GENERATION_ERROR = '生成失败，请稍后重试。';
 
 const PRESETS = [
   { id: 'shanghai-morning', label: '上海·晴朗早晨', icon: '☀︎', city: '上海', weather: '晴朗', hour: 8, prompt: '上班路上有点困，想提神但别太吵' },
@@ -57,8 +58,10 @@ function createApp(overrides = {}) {
     ? { synthesize: async () => { throw new Error(PUBLIC_TTS_ERROR); } }
     : defaultTts);
   const ttsCacheDir = path.resolve(overrides.ttsCacheDir || path.join(__dirname, 'cache', 'tts'));
+  const ttsArtifact = createTtsArtifactStore(ttsCacheDir);
   const clients = new Map();
   const sessionQueues = new Map();
+  const ttsRetryAttempts = new Map();
 
   function broadcast(event) {
     const payload = JSON.stringify(event);
@@ -67,11 +70,45 @@ function createApp(overrides = {}) {
     }
   }
 
+  function retryCardTts(card) {
+    const existing = ttsRetryAttempts.get(card.id);
+    if (existing) return existing;
+
+    const attempt = (async () => {
+      repository.updateTts(card.id, { status: 'pending', url: null, error: null });
+      try {
+        const ttsPath = await tts.synthesize(card.description, {
+          role: 'recommendation', cacheDir: ttsArtifact.root,
+        });
+        const artifact = await ttsArtifact.validateArtifactPath(ttsPath);
+        const url = `/api/tts/${artifact.filename}`;
+        repository.updateTts(card.id, { status: 'ready', url, error: null });
+        broadcast({ type: 'tts-ready', sessionId: card.sessionId, cardId: card.id, ttsUrl: url });
+        return { status: 200, body: { ttsStatus: 'ready', ttsUrl: url } };
+      } catch (_error) {
+        repository.updateTts(card.id, { status: 'failed', url: null, error: PUBLIC_TTS_ERROR });
+        broadcast({
+          type: 'tts-failed', sessionId: card.sessionId, cardId: card.id,
+          error: PUBLIC_TTS_ERROR,
+        });
+        return { status: 503, body: { error: PUBLIC_TTS_ERROR } };
+      }
+    })();
+
+    let owned;
+    owned = attempt.finally(() => {
+      if (ttsRetryAttempts.get(card.id) === owned) ttsRetryAttempts.delete(card.id);
+    });
+    ttsRetryAttempts.set(card.id, owned);
+    return owned;
+  }
+
   const pipeline = overrides.pipeline || createRecommendationPipeline({
     repository,
     llm: overrides.llm || createLlm({ demoMode }),
     musicProvider,
     tts,
+    ttsArtifact,
     emit: broadcast,
     progressDelayMs: demoMode ? 180 : 0,
   });
@@ -133,8 +170,8 @@ function createApp(overrides = {}) {
       broadcast({ type: 'job-started', sessionId, jobId });
       try {
         await pipeline.generate({ sessionId, userInput, environment });
-      } catch (error) {
-        broadcast({ type: 'failed', sessionId, jobId, error: error.message || '生成失败。' });
+      } catch (_error) {
+        broadcast({ type: 'failed', sessionId, jobId, error: PUBLIC_GENERATION_ERROR });
       }
     }).finally(() => {
       if (sessionQueues.get(sessionId) === queued) sessionQueues.delete(sessionId);
@@ -161,25 +198,36 @@ function createApp(overrides = {}) {
   app.post('/api/cards/:cardId/tts/retry', async (req, res) => {
     const card = repository.getCard(req.params.cardId);
     if (!card) return res.status(404).json({ error: '未找到音乐卡片。' });
-    try {
-      const filename = path.basename(await tts.synthesize(card.description, { role: 'recommendation' }));
-      if (!/^[a-zA-Z0-9_-]+\.mp3$/.test(filename)) throw new Error('不安全的缓存文件名。');
-      const url = `/api/tts/${filename}`;
-      repository.updateTts(card.id, { status: 'ready', url, error: null });
-      broadcast({ type: 'tts-ready', sessionId: card.sessionId, cardId: card.id, ttsUrl: url });
-      return res.json({ ttsStatus: 'ready', ttsUrl: url });
-    } catch (_error) {
-      repository.updateTts(card.id, { status: 'failed', error: PUBLIC_TTS_ERROR });
-      return res.status(503).json({ error: PUBLIC_TTS_ERROR });
-    }
+    const result = await retryCardTts(card);
+    return res.status(result.status).json(result.body);
   });
 
-  app.get('/api/tts/:filename', (req, res) => {
+  app.get('/api/tts/:filename', async (req, res) => {
     const filename = req.params.filename;
-    if (!/^[a-zA-Z0-9_-]+\.mp3$/.test(filename)) return res.status(400).end();
-    const filePath = path.join(ttsCacheDir, filename);
-    if (!fs.existsSync(filePath)) return res.status(404).end();
-    return res.sendFile(filePath);
+    if (!ttsArtifact.isValidFilename(filename)) return res.status(400).end();
+    let opened;
+    try {
+      opened = await ttsArtifact.openArtifact(filename);
+    } catch (_error) {
+      return res.status(404).end();
+    }
+
+    res.status(200);
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': String(opened.stats.size),
+      'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'public, max-age=31536000, immutable',
+    });
+    const stream = opened.handle.createReadStream({ autoClose: true });
+    const abortStream = () => stream.destroy();
+    res.once('close', abortStream);
+    stream.once('close', () => res.off('close', abortStream));
+    stream.once('error', () => {
+      if (!res.headersSent) res.status(404).end();
+      else res.destroy();
+    });
+    return stream.pipe(res);
   });
 
   app.get('/api/netease/status', async (_req, res) => {

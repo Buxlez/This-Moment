@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const https = require('https');
 const { pipeline } = require('stream/promises');
+const { createTtsArtifactStore } = require('./tts-artifact');
 
 const CACHE_DIR = path.join(__dirname, 'cache/tts');
 fs.mkdirSync(CACHE_DIR, { recursive: true });
@@ -179,20 +180,24 @@ function synthesize(text, options = {}) {
   } catch (error) {
     return Promise.reject(error);
   }
-  if (isUsableCache(cached)) {
-    console.log(`[TTS] 缓存命中 → ${path.basename(cached)}`);
-    return Promise.resolve(cached);
-  }
-  removeUnusableCache(cached);
-
   const active = activeSynthesis.get(cached);
   if (active) return active;
 
-  const preview = text.slice(0, 40) + (text.length > 40 ? '…' : '');
-  console.log(`[TTS] 合成中 (${provider}${options.role ? `/${options.role}` : ''})："${preview}"`);
-  const startAt = Date.now();
+  const artifactStore = createTtsArtifactStore(path.dirname(cached));
 
   const synthesis = (async () => {
+    try {
+      await artifactStore.validateGeneratedArtifact(cached);
+      console.log(`[TTS] 缓存命中 → ${path.basename(cached)}`);
+      return cached;
+    } catch (error) {
+      if (error.code !== 'TTS_ARTIFACT_NOT_FOUND'
+        && error.code !== 'INVALID_TTS_ARTIFACT_AUDIO') throw error;
+    }
+
+    const preview = text.slice(0, 40) + (text.length > 40 ? '…' : '');
+    console.log(`[TTS] 合成中 (${provider}${options.role ? `/${options.role}` : ''})：“${preview}”`);
+    const startAt = Date.now();
     if (provider === 'volcengine') {
       await synthesizeVolcengine(text, cached, options);
     } else if (provider === 'fish') {
@@ -201,9 +206,7 @@ function synthesize(text, options = {}) {
       await synthesizeKokoro(text, cached, options);
     }
 
-    if (!isUsableCache(cached)) {
-      throw new Error(`${provider} TTS did not produce a usable audio cache file`);
-    }
+    await artifactStore.validateGeneratedArtifact(cached);
 
     console.log(`[TTS] 完成 (${((Date.now() - startAt) / 1000).toFixed(1)}s) → ${path.basename(cached)}`);
     return cached;
@@ -217,27 +220,6 @@ function synthesize(text, options = {}) {
   });
   activeSynthesis.set(cached, pending);
   return pending;
-}
-
-function isUsableCache(filePath) {
-  try {
-    const stats = fs.statSync(filePath);
-    return stats.isFile() && stats.size > 0;
-  } catch {
-    return false;
-  }
-}
-
-function removeUnusableCache(filePath) {
-  try {
-    const stats = fs.statSync(filePath);
-    if (!stats.isFile() || stats.size > 0) return;
-    fs.unlinkSync(filePath);
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.warn(`[TTS] 无法清理无效的缓存文件 → ${path.basename(filePath)}`);
-    }
-  }
 }
 
 function getVoiceForProvider(provider, options = {}) {
@@ -414,9 +396,6 @@ function removeTempFile(tempPath) {
 }
 
 function publishTempFile(tempPath, outPath) {
-  if (!isUsableCache(tempPath)) {
-    throw new Error('TTS provider produced an empty temporary audio file');
-  }
   fs.renameSync(tempPath, outPath);
 }
 

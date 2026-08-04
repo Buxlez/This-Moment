@@ -13,7 +13,7 @@ function plan(count, offset = 0) {
   };
 }
 
-function harness({ playable = 20, previous = null, ttsRejects = false } = {}) {
+function harness({ playable = 20, previous = null, ttsRejects = false, ttsArtifact } = {}) {
   const events = [];
   const calls = [];
   let activeSearches = 0;
@@ -47,12 +47,41 @@ function harness({ playable = 20, previous = null, ttsRejects = false } = {}) {
     repository,
     llm,
     musicProvider,
-    tts: { synthesize: async () => ttsRejects ? Promise.reject(new Error('tts offline')) : '/tmp/voice.mp3' },
+    tts: {
+      synthesize: async () => ttsRejects
+        ? Promise.reject(new Error('tts offline'))
+        : '/tmp/0123456789abcdef0123456789abcdef.mp3',
+    },
+    ttsArtifact: ttsArtifact || {
+      root: '/tmp',
+      validateArtifactPath: async filePath => ({ filename: filePath.split('/').pop() }),
+    },
     emit: event => events.push(event),
     now: () => new Date('2026-08-01T00:20:00.000Z'),
   });
   return { pipeline, events, calls, saved: () => saved, maxActiveSearches: () => maxActiveSearches };
 }
+
+test('requires an explicit TTS artifact validator', () => {
+  const { pipeline } = harness();
+  assert.throws(
+    () => createRecommendationPipeline({ ...pipeline.dependencies, ttsArtifact: undefined }),
+    /TTS artifact|validator/i
+  );
+});
+
+test('passes the trusted cache root to TTS synthesis', async () => {
+  const { pipeline } = harness();
+  let synthesisOptions;
+  pipeline.dependencies.tts.synthesize = async (_text, options) => {
+    synthesisOptions = options;
+    return '/tmp/0123456789abcdef0123456789abcdef.mp3';
+  };
+
+  await pipeline.generate({ sessionId: 's1', userInput: '来点音乐', environment: {} });
+
+  assert.deepEqual(synthesisOptions, { role: 'recommendation', cacheDir: '/tmp' });
+});
 
 test('emits documented stage order and persists the default 8-track card', async () => {
   const { pipeline, events, calls, saved, maxActiveSearches } = harness();
@@ -97,4 +126,21 @@ test('refinement excludes previous tracks and TTS failure does not reject the ca
     sessionId: 's1', type: 'tts-failed', cardId: card.id,
     error: '推荐语音暂不可用，可稍后重试。',
   });
+});
+
+test('rejects a synthesized path that fails the artifact trust boundary', async () => {
+  const upstreamDetail = 'outside cache /private/credential-fragment.mp3';
+  const { pipeline, events } = harness({
+    ttsArtifact: {
+      root: '/tmp',
+      validateArtifactPath: async () => { throw new Error(upstreamDetail); },
+    },
+  });
+
+  const card = await pipeline.generate({ sessionId: 's1', userInput: '来点音乐', environment: {} });
+
+  assert.equal(card.ttsStatus, 'failed');
+  assert.equal(card.ttsUrl, null);
+  assert.equal(card.ttsError, '推荐语音暂不可用，可稍后重试。');
+  assert.equal(JSON.stringify(events).includes(upstreamDetail), false);
 });

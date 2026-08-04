@@ -30,7 +30,6 @@ cp .env.example .env
 ```dotenv
 DEMO_MODE=false
 DEEPSEEK_API_KEY=your_key
-MUSIC_PROVIDER=netease
 ```
 
 `npm start` 会检查并启动本地 NeteaseCloudMusicApi sidecar。没有可用 Cookie 时，会生成 `data/netease/qr-login.html`，使用网易云音乐 App 扫码后将 Cookie 保存在本地 `data/` 中。

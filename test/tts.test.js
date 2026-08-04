@@ -328,6 +328,42 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
   }));
 });
 
+test('synthesize rejects and removes a provider artifact without MP3 framing', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const options = volcengineOptions(
+      cacheDir,
+      async () => streamingResponse([audioEvent('plain text bytes'), completionEvent()])
+    );
+    const target = cachePath('invalid provider audio', 'volcengine', options);
+
+    await assert.rejects(
+      synthesize('invalid provider audio', options),
+      /MP3|artifact|audio/i
+    );
+
+    assert.equal(fs.existsSync(target), false);
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
+  }));
+});
+
+test('synthesize replaces an invalid cached artifact instead of returning it', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let fetchCalls = 0;
+    const options = volcengineOptions(cacheDir, async () => {
+      fetchCalls += 1;
+      return streamingResponse([audioEvent('ID3-replacement'), completionEvent()]);
+    });
+    const target = cachePath('invalid cached audio', 'volcengine', options);
+    fs.writeFileSync(target, Buffer.from('cached text'));
+
+    const output = await synthesize('invalid cached audio', options);
+
+    assert.equal(output, target);
+    assert.equal(fetchCalls, 1);
+    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-replacement'));
+  }));
+});
+
 test('synthesize parses adjacent JSON frames from a WHATWG response across byte chunks', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const frames = [
@@ -389,7 +425,7 @@ test('cache identity includes canonical MP3 output settings', async () => {
     assert.equal(first, equivalent);
     assert.notEqual(first, differentRate);
     assert.notEqual(first, differentResource);
-    assert.equal(path.extname(first), '.mp3');
+    assert.match(path.basename(first), /^[a-f0-9]{32}\.mp3$/);
   }));
 });
 
