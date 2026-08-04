@@ -1,7 +1,10 @@
 node_modules/
 .env
+.env.*
+!.env.example
 cache/tts/*.mp3
-docs/
+.superpowers/
+.playwright-cli/
 *.sqlite
 *.db
 Kokoro-FastAPI/
@@ -23,4 +26,6 @@ skills/netease-music/data/*
 !skills/netease-music/data/.gitkeep
 
 # Claudio local Netease login state. May contain cookies and private QR pages.
-data/netease/*
+data/
+cache/
+output/

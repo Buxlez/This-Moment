@@ -1,141 +1,87 @@
-const { spawn } = require('child_process');
+const OpenAI = require('openai');
+const { RecommendationPlanSchema } = require('./src/domain/recommendation-schema');
+const { coldStartDirection } = require('./src/domain/environment');
+const { DEMO_CATALOG } = require('./src/music/demo-catalog');
+const { buildRecommendationContext } = require('./context');
 
-const DEFAULT_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 120000);
-const DEFAULT_PROVIDER = process.env.LLM_PROVIDER || 'deepseek';
-const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
-const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
-const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT || '';
-const DEEPSEEK_THINKING = process.env.DEEPSEEK_THINKING || '';
-
-async function generateJson(prompt, options = {}) {
-  const provider = options.provider || DEFAULT_PROVIDER;
-  if (provider === 'deepseek') return callDeepSeek(prompt, options);
-  if (provider === 'claude_cli') return callClaudeCli(prompt, options);
-  throw new Error(`Unsupported LLM_PROVIDER: ${provider}`);
+function demoDirection(userInput, environment, previousCard, intent) {
+  const text = String(userInput || '');
+  if ((intent === 'refine' || intent === 'refresh') && previousCard?.direction) {
+    const inherited = JSON.parse(JSON.stringify(previousCard.direction));
+    if (/轻松|放松|安静|轻一点/.test(text)) {
+      inherited.atmosphere = [...new Set([...inherited.atmosphere, '轻松', '舒展'])];
+      inherited.energy = intent === 'refine' ? '中等' : inherited.energy;
+    }
+    return inherited;
+  }
+  if (/困|提神|有精神/.test(text)) {
+    return { atmosphere: ['明亮', '清晰'], energy: '中高但不过强', rhythm: ['活跃', '稳定'] };
+  }
+  if (/累|放松|舒服|舒缓/.test(text)) {
+    return { atmosphere: ['放松', '不过度低沉'], energy: '中低', rhythm: ['舒缓', '稳定'] };
+  }
+  if (/夜景|氛围/.test(text)) {
+    return { atmosphere: ['都市', '有空间感'], energy: '中低至中等', rhythm: ['流动', '不过强'] };
+  }
+  return coldStartDirection(environment);
 }
 
-async function callDeepSeek(prompt, options = {}) {
-  if (!process.env.DEEPSEEK_API_KEY) {
-    throw new Error('DEEPSEEK_API_KEY not set');
-  }
-
-  const OpenAI = await loadOpenAI();
-  const client = new OpenAI({
-    baseURL: process.env.DEEPSEEK_BASE_URL || DEEPSEEK_BASE_URL,
-    apiKey: process.env.DEEPSEEK_API_KEY,
-  });
-  const model = options.model || process.env.DEEPSEEK_MODEL || DEEPSEEK_MODEL;
-  const startAt = Date.now();
-  console.log(`[LLM:deepseek] 调用中，model ${model}，prompt ${prompt.length} 字符…`);
-
-  const request = {
-    model,
-    messages: [
-      { role: 'system', content: 'You are Claudio FM. Return strict JSON only.' },
-      { role: 'user', content: prompt },
-    ],
-    stream: false,
+function demoCopy({ environment, userInput, intent, direction }) {
+  const moment = environment.weather === '下雨' ? '雨声把城市放慢了一些' : '光线正好，城市也慢慢醒来';
+  const title = intent === 'refresh' ? '还是这个方向，换个开场' : intent === 'refine' ? '轻一点，精神还在' :
+    direction.energy.includes('高') ? '清醒一点，慢慢出发' : '在这一刻，把声音放松';
+  const request = String(userInput || '').replace(/[。.!！]+$/g, '').slice(0, 22);
+  return {
+    title,
+    description: `${environment.city}的${moment}，${request ? `“${request}”的感受被留住了` : '就从此刻的环境开始'}。音乐会保持${direction.energy}的能量和${direction.rhythm.join('、')}的节奏，给当下留一点余地。`,
   };
-  if (DEEPSEEK_THINKING) request.thinking = { type: DEEPSEEK_THINKING };
-  if (DEEPSEEK_REASONING_EFFORT) request.reasoning_effort = DEEPSEEK_REASONING_EFFORT;
-
-  const completion = await withTimeout(
-    client.chat.completions.create(request),
-    options.timeoutMs || DEFAULT_TIMEOUT_MS,
-    `DeepSeek request timed out after ${Math.round((options.timeoutMs || DEFAULT_TIMEOUT_MS) / 1000)}s`
-  );
-  const elapsed = ((Date.now() - startAt) / 1000).toFixed(1);
-  const raw = completion.choices?.[0]?.message?.content?.trim() || '';
-  const parsed = parseResponse(raw);
-  logParsedResponse('deepseek', elapsed, parsed, raw);
-  return parsed;
 }
 
-async function loadOpenAI() {
-  try {
-    const mod = await import('openai');
-    return mod.default || mod.OpenAI || mod;
-  } catch (err) {
-    throw new Error('OpenAI SDK not installed. Run `yarn add openai` or `npm install openai`.');
-  }
+function createDemoLlm() {
+  return {
+    async generatePlan({ userInput, environment, previousCard, intent, candidateCount = 40, excludeTracks = [] }) {
+      const direction = demoDirection(userInput, environment, previousCard, intent);
+      const copy = demoCopy({ environment, userInput, intent, direction });
+      const excluded = new Set(excludeTracks.map(String));
+      const candidates = DEMO_CATALOG.filter(track => !excluded.has(track.id)).slice(0, candidateCount)
+        .map(track => ({ title: track.title, artist: track.artist }));
+      return RecommendationPlanSchema.parse({ intent, direction, ...copy, candidates });
+    },
+  };
 }
 
-function callClaudeCli(prompt, options = {}) {
-  const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
-  const startAt = Date.now();
-  console.log(`[LLM:claude_cli] 调用中，prompt ${prompt.length} 字符…`);
-  return new Promise((resolve, reject) => {
-    const proc = spawn('claude', ['-p', prompt], {
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      proc.kill();
-      const stderrPreview = stderr.trim().slice(-800);
-      console.error(`[LLM:claude_cli] 超时（${Math.round(timeoutMs / 1000)}s），已终止；prompt ${prompt.length} 字符`);
-      if (stderrPreview) console.error(`[LLM:claude_cli] stderr 摘要: ${stderrPreview}`);
-      reject(new Error('Claude subprocess timed out'));
-    }, timeoutMs);
-
-    proc.stdout.on('data', d => { stdout += d.toString(); });
-    proc.stderr.on('data', d => {
-      stderr += d.toString();
-      process.stderr.write(d);
-    });
-
-    proc.on('close', () => {
-      clearTimeout(timer);
-      const elapsed = ((Date.now() - startAt) / 1000).toFixed(1);
-      const raw = stdout.trim();
-      const parsed = parseResponse(raw);
-      logParsedResponse('claude_cli', elapsed, parsed, raw);
-      if (!raw) console.warn('[LLM:claude_cli] 警告：返回内容为空');
-      resolve(parsed);
-    });
-
-    proc.on('error', err => {
-      clearTimeout(timer);
-      console.error('[LLM:claude_cli] 进程错误:', err.message);
-      reject(err);
-    });
+function createLiveLlm() {
+  if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY not set');
+  const client = new OpenAI({
+    apiKey: process.env.DEEPSEEK_API_KEY,
+    baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   });
+  return {
+    async generatePlan(input) {
+      const prompt = buildRecommendationContext(input);
+      let lastError;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const completion = await client.chat.completions.create({
+            model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+            messages: [
+              { role: 'system', content: '你是 this moment 的音乐方向编辑。只输出严格 JSON，不要 Markdown。' },
+              { role: 'user', content: attempt ? `${prompt}\n\n上次输出不符合 Schema，请修复后只输出 JSON。` : prompt },
+            ],
+            response_format: { type: 'json_object' },
+            stream: false,
+          });
+          const raw = completion.choices?.[0]?.message?.content || '';
+          return RecommendationPlanSchema.parse(JSON.parse(raw));
+        } catch (error) { lastError = error; }
+      }
+      throw new Error(`模型输出连续两次未通过结构校验：${lastError?.message || '未知错误'}`);
+    },
+  };
 }
 
-function withTimeout(promise, timeoutMs, message) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+function createLlm({ demoMode = false } = {}) {
+  return demoMode ? createDemoLlm() : createLiveLlm();
 }
 
-function parseResponse(raw) {
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        title: parsed.title || '',
-        say: parsed.say || '',
-        play: Array.isArray(parsed.play) ? parsed.play : [],
-        segments: Array.isArray(parsed.segments) ? parsed.segments : [],
-        intros: Array.isArray(parsed.intros) ? parsed.intros : [],
-        reason: parsed.reason || '',
-        mode: parsed.mode || '',
-      };
-    } catch {}
-  }
-  return { title: '', say: raw || 'Okay.', play: [], segments: [], intros: [], reason: '', segue: '', mode: '' };
-}
-
-function logParsedResponse(provider, elapsed, parsed, raw) {
-  const firstSegment = parsed.segments?.find(s => s?.text)?.text || parsed.say || '';
-  const preview = firstSegment.slice(0, 60);
-  console.log(`[LLM:${provider}] 响应 (${elapsed}s) → 「${parsed.title || '无标题'}」| ${parsed.play?.length || 0} 首 | segments: ${parsed.segments?.length || 0} | "${preview}${preview.length >= 60 ? '…' : ''}"`);
-  if (!raw) console.warn(`[LLM:${provider}] 警告：返回内容为空`);
-}
-
-module.exports = { generateJson, parseResponse };
+module.exports = { createLlm, createDemoLlm, createLiveLlm, demoDirection, demoCopy };

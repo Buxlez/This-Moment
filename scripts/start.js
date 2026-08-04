@@ -142,7 +142,7 @@ function spawnChild(name, command, args, options = {}) {
       const detail = signal ? `signal ${signal}` : `code ${code}`;
       console.warn(`[${name}] exited before Claudio shutdown (${detail})`);
     }
-    if (!shuttingDown && name === 'claudio') {
+    if (!shuttingDown && name === 'this-moment') {
       shutdown(signal || code || 0);
     }
   });
@@ -209,7 +209,7 @@ async function startNeteaseIfNeeded() {
     : `still running as pid ${sidecar.pid}`;
   const message = `[start] Netease sidecar did not become ready within ${timeoutMs}ms (${sidecarState}).`;
   if (required) throw new Error(message);
-  console.warn(`${message} Starting Claudio anyway; music.js can still use fallback behavior.`);
+  console.warn(`${message} Starting this moment anyway; the UI will report the unavailable music service.`);
   return { connected: false, baseUrl, required };
 }
 
@@ -229,9 +229,14 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  const neteaseState = await startNeteaseIfNeeded();
-  await prepareNeteaseLogin(neteaseState);
-  spawnChild('claudio', process.execPath, ['server.js'], {
+  const demoMode = boolEnv('DEMO_MODE', !process.env.DEEPSEEK_API_KEY);
+  if (demoMode) {
+    console.log('[start] this moment 本地演示模式：跳过网易云 sidecar 与二维码登录。');
+  } else {
+    const neteaseState = await startNeteaseIfNeeded();
+    await prepareNeteaseLogin(neteaseState);
+  }
+  spawnChild('this-moment', process.execPath, ['server.js'], {
     env: process.env,
   });
 }

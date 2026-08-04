@@ -53,9 +53,10 @@ function createApp(overrides = {}) {
   const ttsConfigured = configuredOverride === undefined
     ? defaultTts.isVolcengineConfigured()
     : Boolean(typeof configuredOverride === 'function' ? configuredOverride() : configuredOverride);
-  const tts = overrides.tts || (ttsConfigured
-    ? defaultTts
-    : { synthesize: async () => { throw new Error(PUBLIC_TTS_ERROR); } });
+  const tts = overrides.tts || (demoMode && !ttsConfigured
+    ? { synthesize: async () => { throw new Error(PUBLIC_TTS_ERROR); } }
+    : defaultTts);
+  const ttsCacheDir = path.resolve(overrides.ttsCacheDir || path.join(__dirname, 'cache', 'tts'));
   const clients = new Map();
   const sessionQueues = new Map();
 
@@ -176,7 +177,7 @@ function createApp(overrides = {}) {
   app.get('/api/tts/:filename', (req, res) => {
     const filename = req.params.filename;
     if (!/^[a-zA-Z0-9_-]+\.mp3$/.test(filename)) return res.status(400).end();
-    const filePath = path.join(__dirname, 'cache', 'tts', filename);
+    const filePath = path.join(ttsCacheDir, filename);
     if (!fs.existsSync(filePath)) return res.status(404).end();
     return res.sendFile(filePath);
   });

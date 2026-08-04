@@ -48,6 +48,8 @@ VOLCENGINE_TTS_SAMPLE_RATE=24000
 
 `VOLCENGINE_TTS_SECRET_KEY` 不参与鉴权，无需配置。如账号支持，也可只用 `VOLCENGINE_TTS_API_KEY` 作为另一种鉴权方式；两种方式都必须同时配置资源 ID 和音色。所有凭据只保存在服务端 `.env` 中，不得放入前端；公开状态接口仅返回“是否已配置”的布尔值，不暴露鉴权方式或任何凭据细节。
 
+对接时请参考火山引擎官方的[单向流式 TTS 文档](https://docs.volcengine.com/docs/6561/2528925?lang=zh)和[双请求头鉴权文档](https://www.volcengine.com/docs/6561/2534847?lang=zh)。旧版双请求头模式使用 `X-Api-App-Id` 和 `X-Api-Access-Key`；`Secret Key` 不使用。
+
 ## 播放行为
 
 最新生成的推荐卡片就绪后，页面会自动尝试一次推荐语旁白。如浏览器的自动播放策略拦截，界面会保留点击播放控件。TTS 失败时只显示安全的稍后重试提示，可手动重试，不会向页面返回上游错误或凭据细节。

@@ -106,6 +106,17 @@ function getNeteaseConfig() {
   };
 }
 
+function isLoopbackHostname(hostname) {
+  const normalized = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.');
+}
+
+function canSendRemoteCookie(url, options) {
+  if (isLoopbackHostname(url.hostname)) return true;
+  const explicitlyTrusted = options.allowRemoteCookie === true || boolEnv('NETEASE_TRUST_REMOTE_COOKIE', false);
+  return explicitlyTrusted && url.protocol === 'https:';
+}
+
 async function requestNeteaseJson(pathname, params = {}, options = {}) {
   const baseUrl = (options.baseUrl || neteaseBaseUrl()).replace(/\/+$/, '');
   const cookie = options.cookie || '';
@@ -113,21 +124,26 @@ async function requestNeteaseJson(pathname, params = {}, options = {}) {
   const url = new URL(pathname, `${baseUrl}/`);
   const query = { ...params };
 
+  if (cookie && !canSendRemoteCookie(url, options)) {
+    throw new Error('Refusing to send a Netease account cookie to a non-local sidecar without an explicit trusted HTTPS opt-in.');
+  }
+
   for (const [key, value] of Object.entries(query)) {
     if (value !== undefined && value !== null && value !== '') {
       url.searchParams.set(key, String(value));
     }
   }
+  if (cookie) url.searchParams.set('cookie', cookie);
   url.searchParams.set('timestamp', String(Date.now()));
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const method = options.method || 'GET';
   const headers = {};
-  if (cookie) headers.Cookie = cookie;
   if (method !== 'GET' && method !== 'HEAD') headers['Content-Type'] = 'application/json';
   try {
-    const res = await fetch(url, {
+    const fetchImpl = options.fetchImpl || fetch;
+    const res = await fetchImpl(url, {
       method,
       headers,
       body: method === 'GET' || method === 'HEAD' ? undefined : '{}',
@@ -142,7 +158,9 @@ async function requestNeteaseJson(pathname, params = {}, options = {}) {
     }
     if (!res.ok) {
       const message = redactSensitiveText(body?.message || body?.msg || `HTTP ${res.status}`);
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = res.status;
+      throw error;
     }
     return body;
   } finally {
@@ -150,21 +168,30 @@ async function requestNeteaseJson(pathname, params = {}, options = {}) {
   }
 }
 
-async function verifyLoginStatus({ baseUrl = neteaseBaseUrl(), cookie } = {}) {
+async function verifyLoginStatus({ baseUrl = neteaseBaseUrl(), cookie, requestJson = requestNeteaseJson } = {}) {
   if (!hasNeteaseCookie(cookie)) {
     return { valid: false, userId: null, reason: 'missing-cookie' };
   }
 
   try {
-    const status = await requestNeteaseJson('/login/status', {}, { baseUrl, cookie });
+    const status = await requestJson('/login/status', {}, { baseUrl, cookie });
     const profile = status?.data?.profile || status?.profile;
     if (profile?.userId) {
       return { valid: true, userId: profile.userId, reason: 'ok' };
+    }
+    const accountStatus = await requestJson('/user/account', {}, { baseUrl, cookie });
+    const accountId = accountStatus?.account?.id;
+    if (accountId) {
+      return { valid: true, userId: accountId, reason: 'account-fallback' };
     }
     return { valid: false, userId: null, reason: 'profile-missing' };
   } catch (err) {
     return { valid: false, userId: null, reason: redactSensitiveText(err.message) };
   }
+}
+
+function shouldUseExistingCookie(status = {}) {
+  return Boolean(status.valid);
 }
 
 function writeQrLoginPage(qrImg, qrUrl) {
@@ -231,7 +258,7 @@ async function bootstrapNeteaseLogin({ baseUrl = neteaseBaseUrl(), required = fa
 
   if (resolved.cookie) {
     const status = await verifyLoginStatus({ baseUrl, cookie: resolved.cookie });
-    if (status.valid) {
+    if (shouldUseExistingCookie(status)) {
       console.log(`[netease-login] Using ${resolved.source} cookie for user ${status.userId}: ${maskSecret(resolved.cookie)}`);
       return { ok: true, source: resolved.source, userId: status.userId };
     }
@@ -285,6 +312,7 @@ module.exports = {
   redactSensitiveText,
   requestNeteaseJson,
   resolveCookie,
+  shouldUseExistingCookie,
   verifyLoginStatus,
   writeLocalConfig,
 };

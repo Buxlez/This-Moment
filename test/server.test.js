@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { WebSocket } = require('ws');
@@ -111,18 +113,40 @@ test('status uses safe injected TTS configuration derived from supported auth mo
   const base = await listen(explicitFalse);
   t.after(() => explicitFalse.close());
   assert.equal((await (await fetch(`${base}/api/status`)).json()).ttsConfigured, false);
-  await assert.rejects(
-    explicitFalse.dependencies.tts.synthesize('recommendation'),
-    error => error.message === PUBLIC_TTS_ERROR
-  );
 
   const explicitTrue = createApp(serverDependencies({ ttsConfigured: true }));
   t.after(() => explicitTrue.close());
   assert.equal(explicitTrue.dependencies.tts, defaultTts);
 });
 
-test('TTS retry publishes one ready update and returns the public MP3 URL', async t => {
+test('unconfigured TTS uses the public fallback only in demo mode', async t => {
+  const demo = createApp(serverDependencies({ demoMode: true, ttsConfigured: false }));
+  t.after(() => demo.close());
+  assert.notEqual(demo.dependencies.tts, defaultTts);
+  await assert.rejects(
+    demo.dependencies.tts.synthesize('recommendation'),
+    error => error.message === PUBLIC_TTS_ERROR
+  );
+
+  const live = createApp(serverDependencies({ demoMode: false, ttsConfigured: false }));
+  t.after(() => live.close());
+  assert.equal(live.dependencies.tts, defaultTts);
+
+  const injectedTts = { synthesize: async () => 'injected.mp3' };
+  const injected = createApp(serverDependencies({
+    demoMode: false, ttsConfigured: false, tts: injectedTts,
+  }));
+  t.after(() => injected.close());
+  assert.equal(injected.dependencies.tts, injectedTts);
+});
+
+test('TTS retry publishes one ready update and returns a servable MP3 URL', async t => {
   const card = fakeCard('retry-session');
+  const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-tts-cache-test-'));
+  const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x54, 0x54, 0x53]);
+  const audioPath = path.join(ttsCacheDir, 'retry_voice.mp3');
+  fs.writeFileSync(audioPath, audio);
+  t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
   const updates = [];
   const repository = {
     listCards: () => [card],
@@ -139,7 +163,8 @@ test('TTS retry publishes one ready update and returns the public MP3 URL', asyn
     card,
     repository,
     ttsConfigured: true,
-    tts: { synthesize: async () => '/private/cache/retry_voice.mp3' },
+    ttsCacheDir,
+    tts: { synthesize: async () => audioPath },
   }));
   const base = await listen(instance);
   t.after(() => instance.close());
@@ -166,6 +191,11 @@ test('TTS retry publishes one ready update and returns the public MP3 URL', asyn
     type: 'tts-ready', sessionId: 'retry-session', cardId: 'card-1',
     ttsUrl: '/api/tts/retry_voice.mp3',
   }]);
+
+  const audioResponse = await fetch(`${base}${result.ttsUrl}`);
+  assert.equal(audioResponse.status, 200);
+  assert.equal(audioResponse.headers.get('content-type'), 'audio/mpeg');
+  assert.deepEqual(Buffer.from(await audioResponse.arrayBuffer()), audio);
 });
 
 test('TTS retry failure returns and stores only the fixed public message', async t => {
