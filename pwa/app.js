@@ -1,6 +1,10 @@
 (function bootThisMoment() {
   'use strict';
 
+  const {
+    RequestGate, TtsState, PollController, reconcileCard, narrationView, captureCardUiState, restoreCardUiState,
+    isCardFromGeneration,
+  } = window.ThisMomentAppModel;
   const $ = selector => document.querySelector(selector);
   const elements = {
     form: $('#recommendationForm'), input: $('#momentInput'), send: $('#sendButton'),
@@ -14,9 +18,15 @@
     play: $('#playButton'), previous: $('#previousButton'), next: $('#nextButton'), seek: $('#seekInput'), current: $('#currentTime'), duration: $('#durationTime'), queue: $('#queuePosition'), mute: $('#muteButton'),
   };
   const playerState = new window.ThisMomentPlayer.PlayerState();
+  const selectionGate = new RequestGate();
+  const ttsState = new TtsState();
   const sessionId = localStorage.getItem('thisMoment.sessionId') || crypto.randomUUID();
   localStorage.setItem('thisMoment.sessionId', sessionId);
-  const state = { cards: new Map(), presets: [], generating: false, socket: null, pollTimer: null, toastTimer: null, pendingEnvironment: null, automaticEnvironment: null };
+  const state = {
+    cards: new Map(), presets: [], generating: false, socket: null, toastTimer: null,
+    pendingEnvironment: null, automaticEnvironment: null, hydrating: true, queuedSocketEvents: [],
+    generationStartedAt: null,
+  };
   const narration = new window.NarrationController({
     createAudio: url => new Audio(url),
     isSongPlaying: () => Boolean(playerState.current()) && !elements.audio.paused && !elements.audio.ended,
@@ -24,9 +34,20 @@
       const card = state.cards.get(cardId);
       if (!card) return;
       card.ttsPlaybackStatus = status;
-      renderCards();
+      updateNarrationCard(card);
     },
     onObserverError: error => showToast(error.message || '推荐语状态更新失败。'),
+  });
+  const generationPoller = new PollController({
+    task: pollGeneration,
+    retryDelays: [1600, 2400, 4000],
+    onComplete: finishPolledGeneration,
+    onExhausted() {
+      state.generating = false;
+      elements.send.disabled = false;
+      elements.progress.hidden = true;
+      showToast('未收到新推荐，请检查连接后重试。');
+    },
   });
 
   function localInputValue(date = new Date()) {
@@ -240,7 +261,7 @@
   function createTrackRow(card, track, index) {
     const row = document.createElement('div');
     row.className = `track-row${index >= 6 ? ' is-hidden' : ''}${isCurrentTrack(card, track) ? ' is-current' : ''}`;
-    row.dataset.cardId = card.id;
+    row.dataset.ownerCardId = card.id;
     row.dataset.trackId = track.id;
     const cover = createCover(track);
     const name = document.createElement('div'); name.className = 'track-name';
@@ -249,6 +270,7 @@
     name.append(title, artist);
     const duration = document.createElement('span'); duration.className = 'track-duration'; duration.textContent = formatDuration(track.durationMs);
     const play = document.createElement('button'); play.type = 'button'; play.className = 'track-play'; play.setAttribute('aria-label', `播放 ${track.title}`);
+    play.dataset.uiKey = `track-${track.id}`;
     play.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7 5 8 5-8 5z"/></svg>';
     play.addEventListener('click', () => {
       if (isCurrentTrack(card, track) && !elements.audio.paused) elements.audio.pause();
@@ -295,49 +317,39 @@
     const footer = document.createElement('div'); footer.className = 'card-footer';
     const source = document.createElement('div'); source.className = 'card-source';
     const badge = document.createElement('span'); badge.className = 'source-badge'; badge.textContent = card.provider === 'demo' ? '演示音源' : '网易云';
-    const sourceText = document.createElement('span'); sourceText.textContent = `${card.tracks.length} 首 · ${card.ttsStatus === 'ready' ? '推荐语已就绪' : card.ttsStatus === 'failed' ? '推荐语生成失败' : '推荐语生成中'}`;
+    const view = narrationView(card);
+    const sourceText = document.createElement('span'); sourceText.className = 'narration-status'; sourceText.textContent = `${card.tracks.length} 首 · ${view.statusText}`;
+    sourceText.setAttribute('role', 'status');
+    sourceText.setAttribute('aria-live', 'polite');
     source.append(badge, sourceText);
     const expand = staticButton(card.tracks.length > 6 ? `查看全部 ${card.tracks.length} 首` : '已显示全部', 'expand-button');
     expand.disabled = card.tracks.length <= 6;
+    expand.dataset.uiKey = 'tracks';
+    expand.dataset.expanded = 'false';
     expand.addEventListener('click', () => {
-      const hidden = article.querySelector('.track-row.is-hidden');
-      const expanding = Boolean(hidden);
-      article.querySelectorAll('.track-row').forEach((row, index) => row.classList.toggle('is-hidden', !expanding && index >= 6));
-      expand.textContent = expanding ? '收起歌曲' : `查看全部 ${card.tracks.length} 首`;
+      const expanding = expand.dataset.expanded !== 'true';
+      expand.dataset.expanded = String(expanding);
+      syncTrackExpansion(expand, expanding);
     });
     footer.append(source, expand); article.append(footer);
 
     const actions = document.createElement('div'); actions.className = 'card-followups';
-    const playbackStatus = card.ttsPlaybackStatus;
-    let narrationLabel = '推荐语生成中';
-    let narrationDisabled = true;
-    let narrationAction = null;
-    if (playbackStatus === 'playing') {
-      narrationLabel = '正在播放推荐语';
-    } else if (playbackStatus === 'blocked') {
-      narrationLabel = '点击播放推荐语';
-      narrationDisabled = false;
-      narrationAction = () => { void narration.play(card); };
-    } else if (card.ttsStatus === 'failed' || playbackStatus === 'failed') {
-      narrationLabel = '重试推荐语';
-      narrationDisabled = false;
-      narrationAction = () => { void retryTts(card); };
-    } else if (card.ttsStatus === 'ready' && card.ttsUrl) {
-      narrationLabel = '播放推荐语';
-      narrationDisabled = false;
-      narrationAction = () => { void narration.play(card); };
-    }
-    const speak = staticButton(narrationLabel, 'secondary-action');
-    speak.disabled = narrationDisabled;
+    const speak = staticButton(view.label, 'secondary-action narration-control');
+    speak.disabled = view.disabled;
+    speak.dataset.uiKey = 'narration';
     const refine = staticButton('再轻松一点', 'text-action');
+    refine.dataset.uiKey = 'refine';
     const refresh = staticButton('换一批', 'text-action');
-    if (narrationAction) speak.addEventListener('click', narrationAction);
+    refresh.dataset.uiKey = 'refresh';
+    speak.addEventListener('click', () => handleNarrationAction(card));
     refine.addEventListener('click', () => submitPrompt('再轻松一点，但保持有精神'));
     refresh.addEventListener('click', () => submitPrompt('换一批'));
     actions.append(speak, refine, refresh);
 
     const reason = document.createElement('details'); reason.className = 'recommendation-reason';
+    reason.dataset.uiKey = 'reason';
     const reasonSummary = document.createElement('summary'); reasonSummary.textContent = '查看推荐依据';
+    reasonSummary.dataset.uiKey = 'reason-summary';
     const directions = document.createElement('div'); directions.className = 'direction-list';
     directions.append(
       directionRow('氛围', card.direction?.atmosphere || []),
@@ -350,22 +362,76 @@
     return turn;
   }
 
+  function handleNarrationAction(card) {
+    const view = narrationView(card);
+    if (view.action === 'retry') void retryTts(card);
+    if (view.action === 'play') void narration.play(card);
+  }
+
+  function syncTrackExpansion(button, expanded) {
+    const article = button.closest('.music-card');
+    if (!article) return;
+    button.dataset.expanded = String(expanded);
+    article.querySelectorAll('.track-row').forEach((row, index) => row.classList.toggle('is-hidden', !expanded && index >= 6));
+    button.textContent = expanded ? '收起歌曲' : `查看全部 ${article.querySelectorAll('.track-row').length} 首`;
+  }
+
+  function findCardElement(cardId) {
+    return [...elements.cards.querySelectorAll('[data-card-id]')]
+      .find(element => String(element.dataset.cardId) === String(cardId)) || null;
+  }
+
+  function updateNarrationCard(card) {
+    const element = findCardElement(card.id);
+    if (!element) return;
+    const view = narrationView(card);
+    const status = element.querySelector('.narration-status');
+    const control = element.querySelector('.narration-control');
+    if (status) status.textContent = `${card.tracks.length} 首 · ${view.statusText}`;
+    if (control) {
+      control.textContent = view.label;
+      control.disabled = view.disabled;
+    }
+  }
+
   function renderCards() {
+    const uiState = captureCardUiState(elements.cards);
     const cards = [...state.cards.values()].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     elements.empty.hidden = cards.length > 0;
     elements.cards.replaceChildren(...cards.map(createCard));
+    restoreCardUiState(elements.cards, uiState, { onExpanded: syncTrackExpansion });
     updatePlayingRows();
   }
 
-  function addCard(card) {
-    state.cards.set(card.id, card);
-    renderCards();
+  function reconcileSnapshots(snapshots) {
+    const newCards = [];
+    (snapshots || []).forEach(snapshot => {
+      const existing = state.cards.get(snapshot.id);
+      if (existing) reconcileCard(existing, snapshot, ttsState);
+      else {
+        const card = { ...snapshot };
+        state.cards.set(card.id, card);
+        newCards.push(card);
+      }
+    });
+    return newCards;
   }
 
-  function completeCard(card) {
+  function applyTtsReady(card, ttsUrl, options = {}) {
+    const result = ttsState.applyReady(card, ttsUrl, options);
+    if (!result.accepted) return result;
+    updateNarrationCard(card);
+    if (card.id === narration.latestCardId && ttsState.claimAutoplay(card)) void narration.autoplay(card);
+    return result;
+  }
+
+  function completeCard(snapshot) {
+    const existing = state.cards.get(snapshot.id);
+    const card = existing ? reconcileCard(existing, snapshot, ttsState) : { ...snapshot };
+    if (!existing) state.cards.set(card.id, card);
     narration.setLatestCardId(card.id);
-    addCard(card);
-    if (card.ttsStatus === 'ready' && card.ttsUrl) void narration.autoplay(card);
+    renderCards();
+    if (card.ttsStatus === 'ready' && card.ttsUrl) applyTtsReady(card, card.ttsUrl);
   }
 
   async function submitPrompt(prompt) {
@@ -377,6 +443,7 @@
     state.pendingEnvironment = submittedEnvironment;
     elements.pendingMessage.textContent = userInput;
     elements.pendingMeta.textContent = environmentMeta(submittedEnvironment);
+    state.generationStartedAt = Date.now();
     state.generating = true; elements.send.disabled = true;
     progress({ stage: 'understanding', label: '理解这一刻', progress: 18 });
     try {
@@ -386,58 +453,54 @@
       });
       elements.input.value = '';
       resizeComposer();
-      clearTimeout(state.pollTimer);
-      state.pollTimer = setTimeout(refreshCards, 1800);
+      generationPoller.start(1800);
     } catch (error) {
       state.generating = false; elements.send.disabled = false; elements.progress.hidden = true; showToast(error.message);
     }
   }
 
-  async function refreshCards() {
-    try {
-      const { cards } = await api(`/api/cards?sessionId=${encodeURIComponent(sessionId)}`);
-      const newCards = cards.filter(card => !state.cards.has(card.id));
-      cards.forEach(card => state.cards.set(card.id, card));
-      renderCards();
-      if (state.generating && newCards.length) {
-        const card = [...newCards].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
-        narration.setLatestCardId(card.id);
-        if (card.ttsStatus === 'ready' && card.ttsUrl) void narration.autoplay(card);
-        state.generating = false; elements.send.disabled = false; finishProgress();
-      } else if (state.generating) {
-        state.pollTimer = setTimeout(refreshCards, 1600);
-      }
-    } catch (error) { showToast(error.message); }
+  async function pollGeneration() {
+    if (!state.generating) return { done: true, value: null };
+    const { cards } = await api(`/api/cards?sessionId=${encodeURIComponent(sessionId)}`);
+    const newCards = reconcileSnapshots(cards);
+    const generationCards = newCards.filter(card => isCardFromGeneration(card, state.generationStartedAt));
+    renderCards();
+    return { done: generationCards.length > 0, value: generationCards };
+  }
+
+  function finishPolledGeneration(newCards) {
+    if (!newCards?.length || !state.generating) return;
+    const card = [...newCards].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1);
+    narration.setLatestCardId(card.id);
+    newCards.forEach(item => {
+      if (item !== card && item.ttsStatus === 'ready' && item.ttsUrl) ttsState.applyReady(item, item.ttsUrl);
+    });
+    if (card.ttsStatus === 'ready' && card.ttsUrl) applyTtsReady(card, card.ttsUrl);
+    state.generating = false;
+    elements.send.disabled = false;
+    finishProgress();
   }
 
   function handleSocketEvent(event) {
     if (event.type === 'progress') progress(event);
     if (event.type === 'complete') {
+      generationPoller.cancel();
       completeCard(event.card); state.generating = false; elements.send.disabled = false; finishProgress();
       setTimeout(() => document.querySelector(`[data-card-id="${CSS.escape(event.card.id)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 120);
     }
     if (event.type === 'failed') {
+      generationPoller.cancel();
       state.generating = false; elements.send.disabled = false; elements.progress.hidden = true; showToast(event.error || '生成失败。');
     }
     if (event.type === 'tts-ready') {
       const card = state.cards.get(event.cardId);
-      if (card) {
-        card.ttsStatus = 'ready';
-        card.ttsUrl = event.ttsUrl;
-        card.ttsError = null;
-        card.ttsPlaybackStatus = 'ready';
-        renderCards();
-        if (card.id === narration.latestCardId) void narration.autoplay(card);
-      }
+      if (card) applyTtsReady(card, event.ttsUrl);
     }
     if (event.type === 'tts-failed') {
       const card = state.cards.get(event.cardId);
       if (card) {
-        card.ttsStatus = 'failed';
-        card.ttsUrl = null;
-        card.ttsError = event.error || null;
-        card.ttsPlaybackStatus = 'failed';
-        renderCards();
+        const result = ttsState.applyFailed(card, event.error || null);
+        if (result.accepted) updateNarrationCard(card);
       }
     }
   }
@@ -447,30 +510,31 @@
     const socket = new WebSocket(`${protocol}//${location.host}/stream?sessionId=${encodeURIComponent(sessionId)}`);
     state.socket = socket;
     socket.addEventListener('message', message => {
-      try { handleSocketEvent(JSON.parse(message.data)); } catch { /* Ignore malformed events. */ }
+      try {
+        const event = JSON.parse(message.data);
+        if (state.hydrating) state.queuedSocketEvents.push(event);
+        else handleSocketEvent(event);
+      } catch { /* Ignore malformed events. */ }
     });
     socket.addEventListener('close', () => setTimeout(connectSocket, 1800));
   }
 
   async function retryTts(card) {
-    card.ttsStatus = 'pending';
-    card.ttsPlaybackStatus = 'pending';
-    card.ttsError = null;
-    renderCards();
+    const retryToken = ttsState.beginRetry(card);
+    updateNarrationCard(card);
     try {
       const result = await api(`/api/cards/${encodeURIComponent(card.id)}/tts/retry`, { method: 'POST' });
-      card.ttsStatus = result.ttsStatus;
-      card.ttsUrl = result.ttsUrl || null;
-      card.ttsPlaybackStatus = result.ttsStatus;
-      renderCards();
-      if (result.ttsStatus === 'ready' && card.ttsUrl) void narration.play(card);
+      if (result.ttsStatus === 'ready') applyTtsReady(card, result.ttsUrl, { retryToken });
+      else {
+        const reduced = ttsState.applyFailed(card, result.error, { retryToken });
+        if (reduced.accepted) updateNarrationCard(card);
+      }
     } catch (error) {
-      card.ttsStatus = 'failed';
-      card.ttsUrl = null;
-      card.ttsError = error.message;
-      card.ttsPlaybackStatus = 'failed';
-      renderCards();
-      showToast(error.message || '推荐语重试失败。');
+      const result = ttsState.applyFailed(card, error.message, { retryToken });
+      if (result.accepted) {
+        updateNarrationCard(card);
+        showToast(error.message || '推荐语重试失败。');
+      }
     }
   }
 
@@ -502,7 +566,7 @@
   function updatePlayingRows() {
     const current = playerState.current();
     document.querySelectorAll('.track-row').forEach(row => {
-      const isCurrent = row.dataset.cardId === playerState.cardId && String(row.dataset.trackId) === String(current?.id || '');
+      const isCurrent = row.dataset.ownerCardId === playerState.cardId && String(row.dataset.trackId) === String(current?.id || '');
       row.classList.toggle('is-current', isCurrent);
       const button = row.querySelector('.track-play');
       if (button) button.setAttribute('aria-label', isCurrent && !elements.audio.paused ? `暂停 ${current.title}` : `播放 ${row.querySelector('.track-name strong')?.textContent || '歌曲'}`);
@@ -515,23 +579,40 @@
   }
 
   async function playCurrent() {
-    const track = playerState.current(); updatePlayer(track);
-    if (!track) { elements.audio.pause(); return; }
+    const track = playerState.current();
+    if (!track) { stopSong(); return; }
+    const cardId = playerState.cardId;
+    stopSong();
+    const request = selectionGate.begin(cardId, track.id);
     try {
       const { url } = await api('/api/playback/resolve', {
-        method: 'POST', body: JSON.stringify({ provider: track.provider, trackId: track.id }),
+        method: 'POST', body: JSON.stringify({ provider: track.provider, trackId: track.id }), signal: request.signal,
       });
+      if (!ownsCurrentSelection(request)) return;
+      updatePlayer(track);
       elements.audio.src = url;
       await elements.audio.play();
+      if (!ownsCurrentSelection(request)) return;
       elements.player.classList.add('is-playing');
-      api('/api/play-events', { method: 'POST', body: JSON.stringify({ sessionId, cardId: playerState.cardId, trackId: track.id, type: 'play' }) }).catch(() => {});
-    } catch (error) { showToast(error.message || '这首歌暂时无法播放。'); }
+      api('/api/play-events', { method: 'POST', body: JSON.stringify({ sessionId, cardId, trackId: track.id, type: 'play' }) }).catch(() => {});
+    } catch (error) {
+      if (!ownsCurrentSelection(request)) return;
+      stopSong();
+      if (error?.name !== 'AbortError') showToast(error.message || '这首歌暂时无法播放。');
+    }
+  }
+
+  function ownsCurrentSelection(request) {
+    return selectionGate.owns(request, playerState.cardId, playerState.current()?.id);
   }
 
   function nextTrack() { narration.stop(); if (playerState.next()) playCurrent(); else stopSong(); }
   function previousTrack() { narration.stop(); playerState.previous(); playCurrent(); }
   function stopSong() {
+    selectionGate.invalidate();
     elements.audio.pause();
+    elements.audio.removeAttribute('src');
+    elements.audio.load();
     elements.audio.currentTime = 0;
     elements.seek.value = '0';
     elements.current.textContent = '0:00';
@@ -553,7 +634,8 @@
     if (!playerState.current()) return showToast('先从音乐卡片选一首歌。');
     if (elements.audio.paused) {
       narration.stop();
-      elements.audio.play().catch(error => showToast(error.message));
+      if (elements.audio.getAttribute('src')) elements.audio.play().catch(error => showToast(error.message));
+      else playCurrent();
     } else elements.audio.pause();
   });
   elements.previous.addEventListener('click', previousTrack);
@@ -562,6 +644,7 @@
   elements.audio.addEventListener('pause', () => { elements.player.classList.remove('is-playing'); elements.play.setAttribute('aria-label', '播放'); updatePlayingRows(); });
   elements.audio.addEventListener('ended', stopSong);
   elements.audio.addEventListener('error', () => {
+    if (!elements.audio.getAttribute('src')) return;
     const action = playerState.onPlaybackError();
     if (action === 'refresh') playCurrent();
     if (action === 'stop') { showToast('播放地址仍不可用，请手动选择其他歌曲。'); stopSong(); }
@@ -589,7 +672,15 @@
       elements.mode.innerHTML = `<span class="status-dot"></span>${status.mode === 'demo' ? '本地演示音源' : '实时网易云音源'}`;
     }
     if (results[1].status === 'fulfilled') { state.presets = results[1].value.presets; renderPresets(); }
-    if (results[2].status === 'fulfilled') { results[2].value.cards.forEach(card => state.cards.set(card.id, card)); renderCards(); }
+    if (results[2].status === 'fulfilled') {
+      reconcileSnapshots(results[2].value.cards);
+      state.cards.forEach(card => {
+        if (card.ttsStatus === 'ready' && card.ttsUrl) ttsState.applyReady(card, card.ttsUrl);
+      });
+      renderCards();
+    }
+    state.hydrating = false;
+    state.queuedSocketEvents.splice(0).forEach(handleSocketEvent);
     if (results.some(result => result.status === 'rejected')) showToast('部分状态暂时未连接，可刷新页面重试。');
     resolveAutomaticEnvironment();
   }
