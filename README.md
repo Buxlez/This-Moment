@@ -1,196 +1,80 @@
-# Claudio FM
+# this moment
 
-**Claudio FM is a private AI radio station.**
+`this moment` 是一个卡片式对话音乐推荐 Demo。你只需说一句当下的状态，它会结合当前时间、天气和演示品味，默认生成一张 8 首音乐卡片；真实音源不足时会如实显示已确认数量。新的微调和“换一批”会继续堆叠，旧卡片不会被覆盖。
 
-It acts like a real DJ: it chooses music, speaks on air, bridges between songs, and keeps the station going based on your taste and the current moment.
+## 直接运行
 
-Claudio is not a playlist generator or a chatbot that waits for commands. Open it, press play, and it begins programming a small radio show for you. It reads the hour, remembers your recent listening, follows your music taste, and turns each DJ line into spoken audio before the next song comes in.
-
-## Preview
-
-![Claudio FM preview](assets/claudio-fm-preview.png)
-
-## What It Feels Like
-
-Claudio is for moments when you do not want to build a playlist.
-
-You might be working, cooking, resting, or just letting the afternoon pass. Claudio listens to the shape of that moment and creates a short set: a few songs, a warm opening, a bridge between tracks, and sometimes silence when the music should speak for itself.
-
-You can also call into the station through the request line. Claudio can play a caller-style voice moment, take your message as a signal, adjust the mood, and keep the broadcast moving.
-
-## What Claudio Does
-
-- Chooses songs based on your taste and the current time.
-- Opens a set with DJ narration.
-- Takes listener calls through the request line.
-- Speaks in short, separate radio segments.
-- Bridges between songs like a live host.
-- Turns DJ lines into voice with TTS.
-- Keeps music buffered so the station can continue.
-- Lets you choose whether the DJ speaks English or Chinese.
-- Lets you control DJ voice volume and music volume separately.
-
-## Why It Is Different
-
-Most music apps help you find tracks.
-
-Claudio tries to make the music feel hosted.
-
-The important part is not just recommendation. It is the feeling that someone is running the station: choosing what fits, saying only what helps, leaving space when needed, and carrying one song into the next.
-
-## Inspiration
-
-The creative inspiration for Claudio FM came from the Douyin creator **mmguo**.
-
-## Running Locally
-
-Install dependencies:
+需要 Node.js 20 或更高版本。
 
 ```bash
-yarn install
+npm install
+npm start
 ```
 
-Create your environment file:
+然后打开 [http://localhost:8080](http://localhost:8080)。
+
+未配置密钥时默认进入“本地演示音源”：推荐、进度、8 首卡片、微调、换一批、历史恢复和播放器都可完整体验。音源会明确标记为“演示音源”，不会伪装成网易云校验结果。未配置云端 TTS 时，推荐语仍保留为文字，可配置后手动重试生成语音。
+
+浏览器允许定位后，页面会通过 Open-Meteo 自动显示当前天气、温度、体感温度和当地时间。精确坐标只用于当次天气请求，不会持久化；拒绝定位时可以继续使用页面内的手动环境和六个预设。
+
+## 接入真实服务
+
+复制环境变量模板：
 
 ```bash
 cp .env.example .env
 ```
 
-Then configure the services you want to use, such as your LLM provider, TTS provider, and music provider settings.
+然后至少设置：
 
-### Required Configuration
+```dotenv
+DEMO_MODE=false
+DEEPSEEK_API_KEY=your_key
+MUSIC_PROVIDER=netease
+```
 
-Claudio uses DeepSeek for DJ planning and Volcengine Doubao Speech for the default DJ voice. Fill these values in `.env`:
+`npm start` 会检查并启动本地 NeteaseCloudMusicApi sidecar。没有可用 Cookie 时，会生成 `data/netease/qr-login.html`，使用网易云音乐 App 扫码后将 Cookie 保存在本地 `data/` 中。
+
+如需云端推荐语音，推荐使用火山引擎的 APP ID + Access Token 双请求头鉴权：
+
+```dotenv
+VOLCENGINE_TTS_APP_ID=your_app_id
+VOLCENGINE_TTS_ACCESS_TOKEN=your_access_token
+VOLCENGINE_TTS_RESOURCE_ID=seed-tts-2.0
+VOLCENGINE_TTS_VOICE_TYPE=zh_female_vv_uranus_bigtts
+VOLCENGINE_TTS_FORMAT=mp3
+VOLCENGINE_TTS_SAMPLE_RATE=24000
+```
+
+`VOLCENGINE_TTS_SECRET_KEY` 不参与鉴权，无需配置。如账号支持，也可只用 `VOLCENGINE_TTS_API_KEY` 作为另一种鉴权方式；两种方式都必须同时配置资源 ID 和音色。所有凭据只保存在服务端 `.env` 中，不得放入前端；公开状态接口仅返回“是否已配置”的布尔值，不暴露鉴权方式或任何凭据细节。
+
+## 播放行为
+
+最新生成的推荐卡片就绪后，页面会自动尝试一次推荐语旁白。如浏览器的自动播放策略拦截，界面会保留点击播放控件。TTS 失败时只显示安全的稍后重试提示，可手动重试，不会向页面返回上游错误或凭据细节。
+
+歌曲始终由用户手动点击播放，播放结束后不会自动切到下一首；选择任何歌曲时会立即停止推荐语旁白。
+
+## 验证
 
 ```bash
-DEEPSEEK_API_KEY=your_deepseek_api_key
-VOLCENGINE_TTS_API_KEY=your_volcengine_tts_api_key
-VOLCENGINE_TTS_RESOURCE_ID=volc.service_type.10029
-VOLCENGINE_TTS_VOICE_TYPE=en_female_nadia_tips_emo_v2_mars_bigtts
+npm test
 ```
 
-- Get a DeepSeek API key from [DeepSeek API Keys](https://platform.deepseek.com/api_keys).
-- Activate and get the Doubao Speech API key from [Volcengine Speech Settings](https://console.volcengine.com/speech/new/setting/activate?ResourceID=volc.service_type.10029&projectName=default).
-- Doubao Speech currently includes 20,000 free characters for the 1.0 voice model and 20,000 free characters for the 2.0 voice model.
+测试覆盖意图路由、环境优先级、Open-Meteo 映射、LLM Schema、音乐匹配去重与详情补全、SQLite 恢复、TTS 降级、HTTP 契约、对话 UI 和播放队列。
 
-Start Claudio:
+## 项目结构
 
-```bash
-yarn start
-```
+- `server.js`：Express、WebSocket、任务串行和 API 契约。
+- `src/recommendation/pipeline.js`：候选、音源校验、持久化和 TTS。
+- `src/environment/open-meteo.js`：无需密钥的自动天气解析与产品天气词汇映射。
+- `src/domain/`：意图、环境优先级和严格 Schema。
+- `src/music/`：单音源接口、歌曲匹配与显式演示目录。
+- `state.js`：会话、轮次、卡片、曲目和播放事件的 SQLite 仓库。
+- `pwa/`：无构建步骤的响应式单页界面和 `HTMLAudioElement` 播放器。
+- `user/taste.md` 与 `user/mood-rules.md`：只读演示配置。
 
-On startup, Claudio checks the local NeteaseCloudMusicApi sidecar. If
-`NETEASE_COOKIE` is not configured and no saved local cookie exists, it creates
-a Netease QR login page at `data/netease/qr-login.html`. Scan it with the
-Netease Cloud Music app to save a local cookie for later runs. The saved cookie
-stays under `data/netease/` and is ignored by Git.
+## 来源与边界
 
-Open:
+本 Demo 以 [bingyanglu/Claudio-FM](https://github.com/bingyanglu/Claudio-FM) `v1.1.1` 的代码形态为技术起点，锁定提交为 `4939b1adc5ddc5ed1289a1e93cd0235b98634abe`，并保留了上游 Git 历史。
 
-```text
-http://localhost:8080
-```
-
-## Current Version
-
-`v1.1.1` is the single-user radio version.
-
-It is designed for one local listener experience: one private station, one local playback session, and one AI DJ running the show.
-
----
-
-# Claudio FM 中文介绍
-
-![Claudio FM preview](assets/claudio-fm-preview.png)
-
-**Claudio FM 是一个 AI 私人电台。**
-
-它会像真正的 DJ 一样，根据你的品味和当下时刻，自动选歌、播报、串场和续播。
-
-Claudio 不是歌单生成器，也不是等你下命令的聊天机器人。你打开它，按下播放，它就开始为你经营一小段电台节目：看现在是什么时间，参考你的音乐品味和最近播放，挑几首合适的歌，再把每一句 DJ 播报转成语音，插入到音乐之间。
-
-## 它听起来像什么
-
-Claudio 适合那些你不想自己整理歌单的时刻。
-
-你可能在工作、做饭、休息，或者只是想让下午自然流过去。Claudio 会感知这个时刻的气氛，生成一小组节目：几首歌，一段开场，歌曲之间的串场，以及在该安静时的留白。
-
-你也可以通过 request line 打进电台。Claudio 会播放一段类似听众来电的声音，把你的话当成一个信号，调整接下来的节目方向，然后继续播下去。
-
-## Claudio FM 会做什么
-
-- 根据你的品味和当前时间选歌。
-- 在一组歌曲开始前进行 DJ 开场。
-- 通过 request line 接听听众来电。
-- 把播报拆成一句一句的电台片段。
-- 像真实主持人一样在歌曲之间串场。
-- 用 TTS 把 DJ 文案转成语音。
-- 自动补歌，让电台继续播下去。
-- 支持选择 DJ 使用英文或中文播报。
-- 支持分别控制 DJ 音量和音乐音量。
-
-## 它特别在哪里
-
-大多数音乐产品是在帮你找歌。
-
-Claudio 想做的是让音乐“有人主持”。
-
-重点不只是推荐了哪几首歌，而是有一个 AI DJ 在后台运营这档节目：判断当下适合什么，知道什么时候该说话，什么时候该安静，以及如何把一首歌自然带到下一首歌。
-
-## 创意来源
-
-Claudio FM 的创意灵感来自抖音博主 **mmguo**。
-
-## 本地运行
-
-安装依赖：
-
-```bash
-yarn install
-```
-
-创建环境变量文件：
-
-```bash
-cp .env.example .env
-```
-
-然后配置你要使用的 LLM、TTS 和音乐服务。
-
-### 必要配置
-
-Claudio 默认使用 DeepSeek 生成 DJ 节目内容，使用火山引擎豆包语音生成 DJ 声音。请在 `.env` 中填写：
-
-```bash
-DEEPSEEK_API_KEY=你的_DeepSeek_API_Key
-VOLCENGINE_TTS_API_KEY=你的_火山引擎_豆包语音_API_Key
-VOLCENGINE_TTS_RESOURCE_ID=volc.service_type.10029
-VOLCENGINE_TTS_VOICE_TYPE=en_female_nadia_tips_emo_v2_mars_bigtts
-```
-
-- DeepSeek API Key 获取地址：[DeepSeek API Keys](https://platform.deepseek.com/api_keys)。
-- 豆包语音 API Key 激活与获取地址：[火山引擎语音技术控制台](https://console.volcengine.com/speech/new/setting/activate?ResourceID=volc.service_type.10029&projectName=default)。
-- 豆包语音目前赠送 1.0 语音模型 20,000 字免费用量，以及 2.0 语音模型 20,000 字免费用量。
-
-启动 Claudio：
-
-```bash
-yarn start
-```
-
-启动时，Claudio 会检查本地 NeteaseCloudMusicApi sidecar。如果没有配置
-`NETEASE_COOKIE`，也没有已保存的本地 cookie，它会生成网易云二维码登录页：
-`data/netease/qr-login.html`。用网易云音乐 App 扫码后，Claudio 会把 cookie
-保存到 `data/netease/`，后续启动自动复用；该目录会被 Git 忽略。
-
-打开：
-
-```text
-http://localhost:8080
-```
-
-## 当前版本
-
-`v1.1.1` 是单人电台版本。
-
-它面向一个本地听众体验：一个私人电台、一个本地播放会话，以及一个在后台运营节目的 AI DJ。
+截至该锁定版本，上游仓库未提供明确 LICENSE。本改造仅用于本地内部原型验证，不代表已获得公开发布、部署或商业使用授权。在对外演示、分发、部署或商业化前，必须先取得作者许可，或替换来源代码。音乐播放能力同样只用于本地原型验证。

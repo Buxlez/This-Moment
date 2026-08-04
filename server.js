@@ -1,790 +1,227 @@
 require('dotenv').config();
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const http = require('node:http');
 const express = require('express');
-const http = require('http');
-const path = require('path');
-const fs = require('fs');
 const { WebSocketServer } = require('ws');
+const { createRepository } = require('./state');
+const { createMusicProvider } = require('./src/music/provider');
+const { createLlm } = require('./llm');
+const { createRecommendationPipeline } = require('./src/recommendation/pipeline');
+const defaultTts = require('./tts');
+const { resolveCookie, verifyLoginStatus } = require('./netease-session');
+const { resolveOpenMeteoWeather } = require('./src/environment/open-meteo');
 
-const { route } = require('./router');
-const { buildPrompt, buildProgramStartPrompt, buildColdOpenForTracksPrompt, buildMusicRefillPrompt, buildBridgePrompt } = require('./context');
-const { callClaude } = require('./claude');
-const { synthesize } = require('./tts');
-const { getTrack } = require('./music');
-const { addPlay, addMessage, recentPlays, getPref } = require('./state');
-const scheduler = require('./scheduler');
+const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
 
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/stream' });
+const PRESETS = [
+  { id: 'shanghai-morning', label: '上海·晴朗早晨', icon: '☀︎', city: '上海', weather: '晴朗', hour: 8, prompt: '上班路上有点困，想提神但别太吵' },
+  { id: 'shenzhen-rain', label: '深圳·雨夜回家', icon: '☲', city: '深圳', weather: '下雨', hour: 21, prompt: '坐车回家有点累，想听点舒服但别太伤感的歌' },
+  { id: 'suzhou-drive', label: '苏州·长途驾驶', icon: '→', city: '苏州', weather: '晴朗', hour: 15, prompt: '高速上还要开很久，想听点有精神但别太炸的歌' },
+  { id: 'xiamen-weekend', label: '厦门·周末上午', icon: '◌', city: '厦门', weather: '晴朗', hour: 10, prompt: '周末开车出去玩，想听点轻松、有公路感的歌' },
+  { id: 'shenzhen-night', label: '深圳·城市夜景', icon: '◐', city: '深圳', weather: '晴朗', hour: 22, prompt: '坐车看夜景，想听点有氛围但别太吵的歌' },
+  { id: 'random', label: '随机一刻', icon: '✦', city: '上海', weather: '多云', hour: 17, prompt: '来点音乐' },
+];
 
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'pwa')));
-
-// ── WebSocket broadcast ──────────────────────────────────────────────────────
-const clients = new Set();
-
-wss.on('connection', ws => {
-  clients.add(ws);
-  ws.on('close', () => clients.delete(ws));
-});
-
-function broadcast(payload) {
-  const msg = JSON.stringify(payload);
-  for (const ws of clients) {
-    if (ws.readyState === 1) ws.send(msg);
-  }
+function bool(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  return /^(1|true|yes|on)$/i.test(String(value));
 }
 
-// ── Current playback state ───────────────────────────────────────────────────
-let nowPlaying = null;
-
-const STATION_NAME = 'Claudio FM';
-const PROGRAM_NAME = 'Evening Drive';
-const REFILL_TRACK_COUNT = 3;
-const PROGRAM_START_ID_TEXT = 'This is Claudio.';
-const TRACK_REPEAT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-const ARTIST_RECENT_WINDOW = 5;
-
-const stationState = {
-  programId: null,
-  sessionTitle: '',
-  tracks: [],
-  generationJobs: [],
-  jobKeys: new Set(),
-  workerRunning: false,
-};
-
-function normalizeDjLanguage(value) {
-  return value === 'zh' ? 'zh' : 'en';
+function localTimeForHour(hour) {
+  const date = new Date();
+  date.setHours(hour, 0, 0, 0);
+  const offset = -date.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const pad = number => String(Math.abs(number)).padStart(2, '0');
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+  return `${local}${sign}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
 }
 
-function buildAnnouncement(result, tracks, failedTracks, speechOnly) {
-  const firstSegmentText = result.segments?.find(s => s?.text)?.text;
-  if (firstSegmentText) return firstSegmentText.trim();
-  if (result.say) return result.say.trim();
-  if (!speechOnly && !tracks.length && failedTracks.length) {
-    return "I couldn't get a clean playable link for that set, so I'm keeping the current signal alive.";
-  }
-  return '';
-}
+function createApp(overrides = {}) {
+  const demoMode = overrides.demoMode ?? bool(process.env.DEMO_MODE, !process.env.DEEPSEEK_API_KEY);
+  const app = express();
+  const server = http.createServer(app);
+  const wss = new WebSocketServer({ noServer: true });
+  const ownRepository = !overrides.repository;
+  const repository = overrides.repository || createRepository(process.env.STATE_DB_PATH);
+  const musicProvider = overrides.musicProvider || createMusicProvider({ demoMode });
+  const weatherResolver = overrides.weatherResolver || resolveOpenMeteoWeather;
+  const configuredOverride = overrides.ttsConfigured;
+  const ttsConfigured = configuredOverride === undefined
+    ? defaultTts.isVolcengineConfigured()
+    : Boolean(typeof configuredOverride === 'function' ? configuredOverride() : configuredOverride);
+  const tts = overrides.tts || (ttsConfigured
+    ? defaultTts
+    : { synthesize: async () => { throw new Error(PUBLIC_TTS_ERROR); } });
+  const clients = new Map();
+  const sessionQueues = new Map();
 
-function programStartIdSegment(programId) {
-  return {
-    id: `${programId}_station_id`,
-    type: 'cold_open',
-    groupId: 'open_0',
-    part: 'station_id',
-    partIndex: 0,
-    position: 'before_track',
-    trackIndex: 0,
-    text: PROGRAM_START_ID_TEXT,
-  };
-}
-
-function makeSegmentId(index) {
-  return `seg_${Date.now()}_${index}`;
-}
-
-function normalizeSegment(raw, index, trackCount) {
-  if (!raw || typeof raw !== 'object') return null;
-  const allowedTypes = new Set(['cold_open', 'bridge', 'quick_touch', 'back_announce', 'silence']);
-  const allowedPositions = new Set(['before_track', 'between_tracks', 'after_track', 'immediate']);
-  const type = allowedTypes.has(raw.type) ? raw.type : 'quick_touch';
-  const defaultPosition = type === 'bridge' ? 'between_tracks' : type === 'cold_open' ? 'before_track' : 'immediate';
-  const position = allowedPositions.has(raw.position) ? raw.position : defaultPosition;
-  const segment = {
-    id: raw.id || makeSegmentId(index),
-    type,
-    position,
-    text: typeof raw.text === 'string' ? raw.text.trim() : '',
-    status: type === 'silence' ? 'silent' : 'pending',
-  };
-
-  if (typeof raw.groupId === 'string' && raw.groupId.trim()) segment.groupId = raw.groupId.trim();
-  if (typeof raw.part === 'string' && raw.part.trim()) segment.part = raw.part.trim();
-  if (Number.isInteger(raw.partIndex)) segment.partIndex = Math.max(0, raw.partIndex);
-  if (Number.isInteger(raw.partCount)) segment.partCount = Math.max(1, raw.partCount);
-
-  if (Number.isInteger(raw.trackIndex)) {
-    segment.trackIndex = Math.max(0, Math.min(raw.trackIndex, Math.max(0, trackCount - 1)));
-  }
-  if (Number.isInteger(raw.afterTrackIndex)) {
-    segment.afterTrackIndex = Math.max(0, Math.min(raw.afterTrackIndex, Math.max(0, trackCount - 1)));
-  }
-  if (Number.isInteger(raw.beforeTrackIndex)) {
-    segment.beforeTrackIndex = Math.max(0, Math.min(raw.beforeTrackIndex, Math.max(0, trackCount - 1)));
-  }
-
-  if (position === 'before_track' && segment.trackIndex === undefined) segment.trackIndex = 0;
-  if (position === 'between_tracks') {
-    if (segment.afterTrackIndex === undefined) segment.afterTrackIndex = Math.max(0, (segment.beforeTrackIndex ?? index) - 1);
-    if (segment.beforeTrackIndex === undefined) segment.beforeTrackIndex = Math.min(trackCount - 1, segment.afterTrackIndex + 1);
-  }
-  if (!trackCount && ['before_track', 'between_tracks', 'after_track'].includes(position)) {
-    segment.position = 'immediate';
-    delete segment.trackIndex;
-    delete segment.afterTrackIndex;
-    delete segment.beforeTrackIndex;
-  }
-  return segment;
-}
-
-function splitSentences(text) {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized) return [];
-  const pieces = normalized.match(/[^.!?。！？]+[.!?。！？"'’”)\]]*/g);
-  return (pieces || [normalized]).map(s => s.trim()).filter(Boolean);
-}
-
-function expandColdOpenParts(segments) {
-  const defaultParts = ['anchor', 'heart', 'turn', 'image', 'invitation'];
-  const expanded = [];
-
-  for (const segment of segments) {
-    if (segment.type !== 'cold_open' || !segment.text || segment.part) {
-      expanded.push(segment);
-      continue;
+  function broadcast(event) {
+    const payload = JSON.stringify(event);
+    for (const [client, sessionId] of clients.entries()) {
+      if (client.readyState === 1 && (!event.sessionId || sessionId === event.sessionId)) client.send(payload);
     }
+  }
 
-    const sentences = splitSentences(segment.text);
-    if (sentences.length <= 1) {
-      expanded.push(segment);
-      continue;
-    }
+  const pipeline = overrides.pipeline || createRecommendationPipeline({
+    repository,
+    llm: overrides.llm || createLlm({ demoMode }),
+    musicProvider,
+    tts,
+    emit: broadcast,
+    progressDelayMs: demoMode ? 180 : 0,
+  });
 
-    const groupId = segment.groupId || segment.id || makeSegmentId(expanded.length);
-    sentences.forEach((text, partIndex) => {
-      expanded.push({
-        ...segment,
-        id: `${groupId}_${partIndex}`,
-        groupId,
-        part: defaultParts[partIndex] || 'line',
-        partIndex,
-        partCount: sentences.length,
-        text,
-      });
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '24kb' }));
+
+  app.get('/api/status', (_req, res) => {
+    res.json({
+      ok: true,
+      name: 'this moment',
+      mode: demoMode ? 'demo' : 'live',
+      musicProvider: musicProvider.name,
+      llmConfigured: demoMode || Boolean(process.env.DEEPSEEK_API_KEY),
+      ttsConfigured,
     });
-  }
+  });
 
-  return expanded;
-}
+  app.get('/api/environment-presets', (_req, res) => {
+    res.json({ presets: PRESETS.map(preset => ({ ...preset, localTime: localTimeForHour(preset.hour) })) });
+  });
 
-function normalizeSegments(result, tracks, speechOnly, failedTracks) {
-  const trackCount = tracks.length;
-  let segments = Array.isArray(result.segments)
-    ? result.segments.map((s, i) => normalizeSegment(s, i, trackCount)).filter(Boolean)
-    : [];
-
-  if (!segments.length) {
-    if (result.say) {
-      segments.push(normalizeSegment({
-        type: speechOnly ? 'quick_touch' : 'cold_open',
-        position: speechOnly ? 'immediate' : 'before_track',
-        trackIndex: 0,
-        text: result.say,
-      }, 0, trackCount));
-    }
-    if (!speechOnly && Array.isArray(result.intros)) {
-      result.intros.forEach((text, i) => {
-        if (i === 0 || !text) return;
-        segments.push(normalizeSegment({
-          type: 'bridge',
-          position: 'between_tracks',
-          afterTrackIndex: i - 1,
-          beforeTrackIndex: i,
-          text,
-        }, segments.length, trackCount));
-      });
-    }
-  }
-
-  if (!speechOnly && !trackCount && failedTracks.length && !segments.some(s => s?.text)) {
-    segments.push(normalizeSegment({
-      type: 'quick_touch',
-      position: 'immediate',
-      text: "I couldn't get a clean playable link for that set, so I'm keeping the current signal alive.",
-    }, segments.length, trackCount));
-  }
-
-  return expandColdOpenParts(segments.filter(Boolean)).map((segment, index) => ({
-    ...segment,
-    id: segment.id || makeSegmentId(index),
-  }));
-}
-
-async function synthesizeSegments(segments) {
-  for (const segment of segments) {
-    if (segment.type === 'silence' || !segment.text) {
-      segment.status = 'silent';
-      continue;
+  app.post('/api/environment/resolve', async (req, res) => {
+    const latitude = Number(req.body?.latitude);
+    const longitude = Number(req.body?.longitude);
+    if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90
+      || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      return res.status(400).json({ error: '无效的位置坐标。' });
     }
     try {
-      console.log(`[TTS] 合成 ${segment.type} (${segment.text.length} 字): "${segment.text.slice(0, 50)}…"`);
-      const f = await synthesize(segment.text);
-      segment.ttsUrl = '/api/tts/' + path.basename(f);
-      segment.status = 'ready';
-      console.log(`[TTS] ${segment.type} 完成 → ${path.basename(f)}`);
-    } catch (err) {
-      segment.status = 'tts_failed';
-      segment.error = err.message;
-      console.error(`[TTS] ${segment.type} 合成失败:`, err.message);
+      const environment = await weatherResolver({ latitude, longitude });
+      const { latitude: _latitude, longitude: _longitude, ...safeEnvironment } = environment || {};
+      return res.json(safeEnvironment);
+    } catch (_error) {
+      return res.status(502).json({ error: '暂时无法获取当前天气，可使用手动环境。' });
     }
-  }
-  return segments;
-}
+  });
 
-function applyLegacyTrackIntrosFromSegments(tracks, segments) {
-  for (const segment of segments) {
-    if (!segment.ttsUrl || !segment.text) continue;
-    if (segment.position === 'between_tracks' && Number.isInteger(segment.beforeTrackIndex)) {
-      const track = tracks[segment.beforeTrackIndex];
-      if (track && !track.introTtsUrl) {
-        track.introTtsUrl = segment.ttsUrl;
-        track.introTranscript = segment.text;
-        track.segmentId = segment.id;
+  app.get('/api/cards', (req, res) => {
+    const sessionId = String(req.query.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: '缺少 sessionId。' });
+    return res.json({ cards: repository.listCards(sessionId) });
+  });
+
+  app.get('/api/cards/:cardId', (req, res) => {
+    const card = repository.getCard(req.params.cardId);
+    return card ? res.json({ card }) : res.status(404).json({ error: '未找到音乐卡片。' });
+  });
+
+  app.post('/api/recommendations', (req, res) => {
+    const sessionId = String(req.body?.sessionId || '').trim();
+    const userInput = String(req.body?.userInput || '').trim();
+    const environment = req.body?.environment || {};
+    if (!sessionId || sessionId.length > 100) return res.status(400).json({ error: '无效的会话标识。' });
+    if (!userInput || userInput.length > 500) return res.status(400).json({ error: '请输入 1–500 个字符的音乐需求。' });
+    const jobId = crypto.randomUUID();
+    const previous = sessionQueues.get(sessionId) || Promise.resolve();
+    const queued = previous.catch(() => {}).then(async () => {
+      broadcast({ type: 'job-started', sessionId, jobId });
+      try {
+        await pipeline.generate({ sessionId, userInput, environment });
+      } catch (error) {
+        broadcast({ type: 'failed', sessionId, jobId, error: error.message || '生成失败。' });
       }
-    }
-  }
-}
+    }).finally(() => {
+      if (sessionQueues.get(sessionId) === queued) sessionQueues.delete(sessionId);
+    });
+    sessionQueues.set(sessionId, queued);
+    return res.status(202).json({ jobId, status: 'queued' });
+  });
 
-function makeProgramId() {
-  return `program_${Date.now()}`;
-}
+  app.post('/api/playback/resolve', async (req, res) => {
+    const trackId = String(req.body?.trackId || '');
+    const provider = String(req.body?.provider || '');
+    if (!trackId || provider !== musicProvider.name) return res.status(400).json({ error: '无效的音源或歌曲 ID。' });
+    const url = await musicProvider.resolvePlaybackUrl(trackId);
+    return url ? res.json({ url, expiresIn: demoMode ? null : 1200 }) : res.status(404).json({ error: '播放地址暂不可用。' });
+  });
 
-function callerTtsOptions() {
-  return {
-    role: 'caller',
-    provider: process.env.CALLER_TTS_PROVIDER || process.env.TTS_PROVIDER || 'volcengine',
-    apiKey: process.env.CALLER_TTS_API_KEY || process.env.VOLCENGINE_TTS_API_KEY,
-    endpoint: process.env.CALLER_TTS_ENDPOINT || process.env.VOLCENGINE_TTS_ENDPOINT,
-    resourceId: process.env.CALLER_TTS_RESOURCE_ID || process.env.VOLCENGINE_TTS_RESOURCE_ID,
-    voiceType: process.env.CALLER_TTS_VOICE_TYPE || process.env.VOLCENGINE_TTS_VOICE_TYPE,
-    voiceId: process.env.CALLER_FISH_VOICE_ID || process.env.FISH_VOICE_ID,
-    voice: process.env.CALLER_KOKORO_VOICE || process.env.KOKORO_VOICE,
-    model: process.env.CALLER_KOKORO_MODEL || process.env.KOKORO_MODEL,
-    baseUrl: process.env.CALLER_KOKORO_API_BASE || process.env.KOKORO_API_BASE,
-    format: process.env.CALLER_TTS_FORMAT || process.env.VOLCENGINE_TTS_FORMAT,
-    sampleRate: process.env.CALLER_TTS_SAMPLE_RATE || process.env.VOLCENGINE_TTS_SAMPLE_RATE,
-    additions: process.env.CALLER_TTS_ADDITIONS || process.env.VOLCENGINE_TTS_ADDITIONS,
-  };
-}
+  app.post('/api/play-events', (req, res) => {
+    const { sessionId, cardId, trackId, type } = req.body || {};
+    if (!sessionId || !type) return res.status(400).json({ error: '缺少播放事件字段。' });
+    repository.recordPlayEvent({ sessionId, cardId, trackId, type });
+    return res.status(204).end();
+  });
 
-function trackLabel(track) {
-  if (!track) return '';
-  return `${track.title || track.query || ''}${track.artist ? ' — ' + track.artist : ''}`.trim();
-}
-
-function normalizeTrackText(value) {
-  return String(value || '')
-    .toLowerCase()
-    .normalize('NFKC')
-    .replace(/[^\p{Letter}\p{Number}]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function trackIdentity(track) {
-  const title = normalizeTrackText(track?.title || track?.query || '');
-  const artist = normalizeTrackText(track?.artist || '');
-  return artist ? `${title}::${artist}` : title;
-}
-
-function trackUrlIdentity(track) {
-  return String(track?.streamUrl || track?.source_url || '').trim();
-}
-
-function parseRequestedTrack(query) {
-  const parts = String(query || '').split(/\s+-\s+/);
-  return {
-    title: parts[0]?.trim() || String(query || '').trim(),
-    artist: parts.slice(1).join(' - ').trim(),
-  };
-}
-
-function trackMatchesRequest(requested, resolved) {
-  const requestedTitle = normalizeTrackText(requested.title);
-  const requestedArtist = normalizeTrackText(requested.artist);
-  const resolvedTitle = normalizeTrackText(resolved.title);
-  const resolvedArtist = normalizeTrackText(resolved.artist);
-  if (!requestedTitle || !resolvedTitle) return true;
-
-  const titleMatches = requestedTitle === resolvedTitle ||
-    requestedTitle.includes(resolvedTitle) ||
-    resolvedTitle.includes(requestedTitle);
-  const artistMatches = !requestedArtist || !resolvedArtist ||
-    requestedArtist === resolvedArtist ||
-    requestedArtist.includes(resolvedArtist) ||
-    resolvedArtist.includes(requestedArtist);
-
-  return titleMatches && artistMatches;
-}
-
-function shouldSkipTrack(track, avoidState) {
-  const identity = trackIdentity(track);
-  const urlIdentity = trackUrlIdentity(track);
-  const artist = normalizeTrackText(track.artist);
-  if (!identity) return { skip: false };
-
-  if (avoidState.batchTrackKeys.has(identity) || (urlIdentity && avoidState.batchUrlKeys.has(urlIdentity))) {
-    return { skip: true, reason: 'same batch duplicate' };
-  }
-  if (avoidState.queueTrackKeys.has(identity) || (urlIdentity && avoidState.queueUrlKeys.has(urlIdentity))) {
-    return { skip: true, reason: 'already in current queue' };
-  }
-  if (avoidState.cooldownTrackKeys.has(identity) || (urlIdentity && avoidState.cooldownUrlKeys.has(urlIdentity))) {
-    return { skip: true, reason: 'played within 24h' };
-  }
-  if (artist && avoidState.recentArtistKeys.has(artist)) {
-    return { skip: true, reason: `artist appeared in recent ${ARTIST_RECENT_WINDOW}` };
-  }
-  return { skip: false };
-}
-
-function createTrackAvoidState(extraQueue = []) {
-  const queueTracks = [
-    ...stationState.tracks,
-    ...(Array.isArray(extraQueue) ? extraQueue : []),
-  ];
-  const queueTrackKeys = new Set(queueTracks.map(trackIdentity).filter(Boolean));
-  const queueUrlKeys = new Set(queueTracks.map(trackUrlIdentity).filter(Boolean));
-  const recent = recentPlays(50);
-  const cutoff = Date.now() - TRACK_REPEAT_COOLDOWN_MS;
-  const cooldownTracks = recent.filter(track => Number(track.played_at) >= cutoff);
-  return {
-    batchTrackKeys: new Set(),
-    batchUrlKeys: new Set(),
-    queueTrackKeys,
-    queueUrlKeys,
-    cooldownTrackKeys: new Set(cooldownTracks.map(trackIdentity).filter(Boolean)),
-    cooldownUrlKeys: new Set(cooldownTracks.map(trackUrlIdentity).filter(Boolean)),
-    recentArtistKeys: new Set(recent.slice(0, ARTIST_RECENT_WINDOW).map(track => normalizeTrackText(track.artist)).filter(Boolean)),
-  };
-}
-
-function normalizeTracksForPrompt(tracks = []) {
-  return tracks.map(track => ({
-    query: track.query || trackLabel(track),
-    title: track.title || track.query || '',
-    artist: track.artist || '',
-  }));
-}
-
-async function resolveRequestedTracks(requestedTracks, options = {}) {
-  const tracks = [];
-  const failedTracks = [];
-  const avoidState = createTrackAvoidState(options.queue || []);
-  for (let i = 0; i < requestedTracks.length; i++) {
-    const query = requestedTracks[i];
-    const track = await getTrack(query);
-    if (track?.streamUrl) {
-      const requested = parseRequestedTrack(query);
-      if (!trackMatchesRequest(requested, track)) {
-        failedTracks.push(`${query} (resolved mismatch: ${track.title}${track.artist ? ' — ' + track.artist : ''})`);
-        console.log(`[音乐] ↷ ${i + 1}/${requestedTracks.length} 跳过错配: 请求 "${query}"，返回 "${track.title}${track.artist ? ' — ' + track.artist : ''}"`);
-        continue;
-      }
-      const payloadTrack = {
-        query,
-        title: track.title || requested.title || query,
-        artist: track.artist || requested.artist || '',
-        streamUrl: track.streamUrl,
-      };
-      const skip = shouldSkipTrack(payloadTrack, avoidState);
-      if (skip.skip) {
-        failedTracks.push(`${query} (${skip.reason})`);
-        console.log(`[音乐] ↷ ${i + 1}/${requestedTracks.length} 跳过重复: ${payloadTrack.title}${payloadTrack.artist ? ' — ' + payloadTrack.artist : ''} | ${skip.reason}`);
-        continue;
-      }
-      tracks.push(payloadTrack);
-      avoidState.batchTrackKeys.add(trackIdentity(payloadTrack));
-      const urlIdentity = trackUrlIdentity(payloadTrack);
-      if (urlIdentity) avoidState.batchUrlKeys.add(urlIdentity);
-      addPlay({ title: payloadTrack.title, artist: payloadTrack.artist, source_url: payloadTrack.streamUrl });
-      console.log(`[音乐] ✓ ${i + 1}/${requestedTracks.length} 找到: ${payloadTrack.title}${payloadTrack.artist ? ' — ' + payloadTrack.artist : ''}`);
-    } else {
-      failedTracks.push(query);
-      console.log(`[音乐] ✗ ${i + 1}/${requestedTracks.length} 未找到: ${query}`);
-    }
-  }
-  return { tracks, failedTracks };
-}
-
-function enqueueJob(job) {
-  const key = job.key || `${job.type}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-  if (stationState.jobKeys.has(key)) {
-    console.log(`[jobs] 跳过重复任务 ${key}`);
-    return false;
-  }
-  stationState.jobKeys.add(key);
-  stationState.generationJobs.push({ ...job, key });
-  console.log(`[jobs] 入队 ${key}`);
-  drainJobs();
-  return true;
-}
-
-async function drainJobs() {
-  if (stationState.workerRunning) return;
-  stationState.workerRunning = true;
-  while (stationState.generationJobs.length) {
-    const job = stationState.generationJobs.shift();
+  app.post('/api/cards/:cardId/tts/retry', async (req, res) => {
+    const card = repository.getCard(req.params.cardId);
+    if (!card) return res.status(404).json({ error: '未找到音乐卡片。' });
     try {
-      console.log(`[jobs] 开始 ${job.key}`);
-      await runJob(job);
-      console.log(`[jobs] 完成 ${job.key}`);
-    } catch (err) {
-      console.error(`[jobs] 失败 ${job.key}:`, err.message);
-      broadcast({ type: 'job-status', key: job.key, jobType: job.type, status: 'failed', error: err.message });
-    } finally {
-      stationState.jobKeys.delete(job.key);
+      const filename = path.basename(await tts.synthesize(card.description, { role: 'recommendation' }));
+      if (!/^[a-zA-Z0-9_-]+\.mp3$/.test(filename)) throw new Error('不安全的缓存文件名。');
+      const url = `/api/tts/${filename}`;
+      repository.updateTts(card.id, { status: 'ready', url, error: null });
+      broadcast({ type: 'tts-ready', sessionId: card.sessionId, cardId: card.id, ttsUrl: url });
+      return res.json({ ttsStatus: 'ready', ttsUrl: url });
+    } catch (_error) {
+      repository.updateTts(card.id, { status: 'failed', error: PUBLIC_TTS_ERROR });
+      return res.status(503).json({ error: PUBLIC_TTS_ERROR });
     }
-  }
-  stationState.workerRunning = false;
-}
-
-async function runJob(job) {
-  if (job.type === 'program_start') return runProgramStartJob(job);
-  if (job.type === 'music_refill') return runMusicRefillJob(job);
-  if (job.type === 'bridge_generation') return runBridgeGenerationJob(job);
-  throw new Error(`Unknown job type: ${job.type}`);
-}
-
-function enqueueBridgeJobs({ programId, sessionTitle, tracks, startIndex = 0, previousTrack = null, previousIndex = null, djLanguage = 'en' }) {
-  if (previousTrack && tracks.length) {
-    enqueueJob({
-      type: 'bridge_generation',
-      key: `bridge:${programId}:${previousIndex}:${startIndex}`,
-      programId,
-      sessionTitle,
-      afterTrack: previousTrack,
-      beforeTrack: tracks[0],
-      afterTrackIndex: previousIndex,
-      beforeTrackIndex: startIndex,
-      djLanguage: normalizeDjLanguage(djLanguage),
-    });
-  }
-  for (let i = 1; i < tracks.length; i++) {
-    enqueueJob({
-      type: 'bridge_generation',
-      key: `bridge:${programId}:${startIndex + i - 1}:${startIndex + i}`,
-      programId,
-      sessionTitle,
-      afterTrack: tracks[i - 1],
-      beforeTrack: tracks[i],
-      afterTrackIndex: startIndex + i - 1,
-      beforeTrackIndex: startIndex + i,
-      djLanguage: normalizeDjLanguage(djLanguage),
-    });
-  }
-}
-
-async function runProgramStartJob(job) {
-  const programId = makeProgramId();
-  const prompt = buildProgramStartPrompt(job.input || 'Open the station.', job.queueState || '', {
-    djLanguage: job.djLanguage,
   });
-  const result = await callClaude(prompt);
-  const { tracks, failedTracks } = await resolveRequestedTracks(result.play || []);
-  let coldOpenSegments = (result.segments || []).filter(segment => segment?.type === 'cold_open');
-  let coldOpenReason = result.reason;
-  if (tracks.length) {
-    const coldOpenPrompt = buildColdOpenForTracksPrompt({
-      programTitle: result.title || '',
-      tracks,
-      userInput: job.input || 'Open the station.',
-      djLanguage: job.djLanguage,
-    });
-    const coldOpenScript = await callClaude(coldOpenPrompt);
-    coldOpenSegments = Array.isArray(coldOpenScript.segments) ? coldOpenScript.segments : coldOpenSegments;
-    coldOpenReason = coldOpenScript.reason || coldOpenReason;
+
+  app.get('/api/tts/:filename', (req, res) => {
+    const filename = req.params.filename;
+    if (!/^[a-zA-Z0-9_-]+\.mp3$/.test(filename)) return res.status(400).end();
+    const filePath = path.join(__dirname, 'cache', 'tts', filename);
+    if (!fs.existsSync(filePath)) return res.status(404).end();
+    return res.sendFile(filePath);
+  });
+
+  app.get('/api/netease/status', async (_req, res) => {
+    if (demoMode) return res.json({ required: false, connected: false, loggedIn: false, source: 'demo' });
+    const resolved = resolveCookie();
+    const status = await verifyLoginStatus({ cookie: resolved.cookie });
+    return res.json({ required: true, connected: status.reason !== 'network-error', loggedIn: status.valid, source: resolved.source });
+  });
+
+  app.use(express.static(path.join(__dirname, 'pwa'), { extensions: ['html'] }));
+
+  server.on('upgrade', (request, socket, head) => {
+    const url = new URL(request.url, 'http://localhost');
+    if (url.pathname !== '/stream') return socket.destroy();
+    wss.handleUpgrade(request, socket, head, ws => wss.emit('connection', ws, request));
+  });
+  wss.on('connection', (ws, request) => {
+    const sessionId = new URL(request.url, 'http://localhost').searchParams.get('sessionId') || '';
+    clients.set(ws, sessionId);
+    ws.send(JSON.stringify({ type: 'connected', sessionId }));
+    ws.on('close', () => clients.delete(ws));
+  });
+
+  function close() {
+    for (const client of clients.keys()) client.terminate();
+    wss.close();
+    if (server.listening) server.close();
+    if (ownRepository) repository.close();
   }
-  const coldOpenResult = {
-    ...result,
-    segments: [
-      programStartIdSegment(programId),
-      ...coldOpenSegments,
-    ],
-  };
-  const segments = await synthesizeSegments(normalizeSegments(coldOpenResult, tracks, false, failedTracks));
 
-  stationState.programId = programId;
-  stationState.sessionTitle = result.title || '';
-  stationState.tracks = tracks;
-  if (tracks.length) nowPlaying = { title: tracks[0].title, artist: tracks[0].artist, startedAt: Date.now() };
-  addMessage('claudio', segments.filter(s => s.text).map(s => s.text).join('\n\n'));
-
-  const payload = {
-    type: 'program-start',
-    programId,
-    tracks,
-    segments,
-    sessionTitle: result.title || '',
-    stationName: STATION_NAME,
-    programName: PROGRAM_NAME,
-    failedTracks,
-    reason: coldOpenReason,
-  };
-  broadcast(payload);
-
-  enqueueBridgeJobs({ programId, sessionTitle: result.title || '', tracks, startIndex: 0, djLanguage: job.djLanguage });
-  return payload;
+  return { app, server, wss, close, dependencies: { repository, pipeline, musicProvider, tts } };
 }
 
-async function runMusicRefillJob(job) {
-  const programId = job.programId || stationState.programId || makeProgramId();
-  const queue = normalizeTracksForPrompt(job.queue || stationState.tracks);
-  const prompt = buildMusicRefillPrompt({
-    programTitle: job.sessionTitle || stationState.sessionTitle,
-    currentTrack: job.currentTrack,
-    queue,
-    count: job.count || REFILL_TRACK_COUNT,
+if (require.main === module) {
+  const instance = createApp();
+  const port = Number(process.env.PORT || 8080);
+  instance.server.listen(port, () => {
+    const mode = instance.dependencies.musicProvider.name === 'demo' ? '演示模式' : '实时音源';
+    console.log(`[this moment] ${mode}已启动 → http://localhost:${port}`);
   });
-  const result = await callClaude(prompt);
-  const { tracks, failedTracks } = await resolveRequestedTracks(result.play || [], { queue });
-  const startIndex = Number.isInteger(job.queueLength) ? job.queueLength : stationState.tracks.length;
-  const previousTrack = job.previousTrack || stationState.tracks[stationState.tracks.length - 1] || null;
-  const previousIndex = Number.isInteger(job.previousIndex) ? job.previousIndex : startIndex - 1;
-
-  stationState.programId = programId;
-  stationState.sessionTitle = job.sessionTitle || stationState.sessionTitle || result.title || '';
-  stationState.tracks = [...stationState.tracks, ...tracks];
-
-  const payload = {
-    type: 'tracks-ready',
-    programId,
-    tracks,
-    startIndex,
-    failedTracks,
-    reason: result.reason,
-  };
-  broadcast(payload);
-  enqueueBridgeJobs({ programId, sessionTitle: stationState.sessionTitle, tracks, startIndex, previousTrack, previousIndex, djLanguage: job.djLanguage });
-  return payload;
+  const shutdown = () => { instance.close(); process.exit(0); };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
-async function runBridgeGenerationJob(job) {
-  const prompt = buildBridgePrompt({
-    programTitle: job.sessionTitle || stationState.sessionTitle,
-    afterTrack: job.afterTrack,
-    beforeTrack: job.beforeTrack,
-    afterTrackIndex: job.afterTrackIndex,
-    beforeTrackIndex: job.beforeTrackIndex,
-    djLanguage: job.djLanguage,
-  });
-  const result = await callClaude(prompt);
-  let segments = await synthesizeSegments(normalizeSegments(
-    result,
-    new Array(Math.max(job.beforeTrackIndex + 1, 1)).fill(null),
-    false,
-    []
-  ));
-  segments = segments.filter(segment =>
-    segment.position === 'between_tracks' &&
-    segment.afterTrackIndex === job.afterTrackIndex &&
-    segment.beforeTrackIndex === job.beforeTrackIndex
-  );
-  if (!segments.length) {
-    segments = [normalizeSegment({
-      type: 'silence',
-      position: 'between_tracks',
-      afterTrackIndex: job.afterTrackIndex,
-      beforeTrackIndex: job.beforeTrackIndex,
-      text: '',
-    }, 0, job.beforeTrackIndex + 1)];
-  }
-  broadcast({
-    type: 'segment-ready',
-    programId: job.programId || stationState.programId,
-    segments,
-  });
-  if (segments.some(s => s.text)) addMessage('claudio', segments.filter(s => s.text).map(s => s.text).join('\n\n'));
-  return segments;
-}
-
-// ── Radio engine — core segment runner ───────────────────────────────────────
-async function runRadioSegment(userInput, intent = {}, skipHistory = false) {
-  const src = intent.source || 'user';
-  console.log(`\n[电台] ── 节目段开始 ── 来源: ${src}`);
-  console.log(`[电台] 输入: "${userInput.slice(0, 80)}${userInput.length > 80 ? '…' : ''}"`);
-
-  if (!skipHistory) addMessage('user', userInput);
-  const prompt = buildPrompt(userInput, nowPlaying ? JSON.stringify(nowPlaying) : '', {
-    mode: intent.mode,
-    djLanguage: intent.djLanguage,
-  });
-  const speechOnly = intent.mode === 'speech-only';
-  const result = await callClaude(prompt);
-
-  console.log(`[电台] Claude 回复 → 节目「${result.title || '无标题'}」| 请求曲目 ${result.play?.length || 0} 首`);
-  if (result.segments?.length) console.log(`[电台] 脚本段落: ${result.segments.length}`);
-  if (result.say) console.log(`[电台] 兼容旁白: "${result.say.slice(0, 100)}${result.say.length > 100 ? '…' : ''}"`);
-
-  const requestedTracks = speechOnly ? [] : (result.play || []);
-  const { tracks, failedTracks } = await resolveRequestedTracks(requestedTracks);
-
-  const segments = await synthesizeSegments(normalizeSegments(result, tracks, speechOnly, failedTracks));
-  applyLegacyTrackIntrosFromSegments(tracks, segments);
-  const firstPlayableSegment = segments.find(s => s.ttsUrl && s.text && s.type !== 'silence');
-  const announcement = buildAnnouncement({ ...result, segments }, tracks, failedTracks, speechOnly);
-  const spokenSummary = segments.filter(s => s.text).map(s => s.text).join('\n\n');
-  addMessage('claudio', spokenSummary || announcement || result.say || '');
-  const ttsUrl = firstPlayableSegment?.ttsUrl || null;
-
-  if (tracks.length) {
-    nowPlaying = { title: tracks[0].title, artist: tracks[0].artist, startedAt: Date.now() };
-  }
-
-  const payload = {
-    type: 'now-playing',
-    ttsUrl,
-    tracks,
-    segments,
-    sessionTitle: result.title || '',
-    transcript: announcement,
-    djNote: result.say,
-    reason: result.reason,
-    mode: speechOnly ? 'speech-only' : 'music',
-    status: speechOnly ? 'speaking' : (tracks.length ? 'queued' : 'speaking'),
-    stationName: STATION_NAME,
-    programName: PROGRAM_NAME,
-    trigger: intent.source || 'user',
-    failedTracks,
-  };
-
-  broadcast(payload);
-  console.log(`[电台] ── 广播完成 ── 入队 ${tracks.length} 首 | 失败 ${failedTracks.length} 首\n`);
-  return payload;
-}
-
-async function handleClaudeRequest(userInput, res, intent = {}, skipHistory = false) {
-  try {
-    const payload = await runRadioSegment(userInput, intent, skipHistory);
-    res.setHeader('Content-Type', 'application/json');
-    res.json(payload);
-  } catch (err) {
-    console.error('[chat]', err);
-    res.status(500).json({ error: err.message });
-  }
-}
-
-// ── HTTP Routes ──────────────────────────────────────────────────────────────
-app.post('/api/chat', async (req, res) => {
-  const { message, autoRefill, djLanguage } = req.body;
-  if (!message) return res.status(400).json({ error: 'message required' });
-
-  const intent = route(message);
-  intent.source = autoRefill ? 'autoRefill' : 'user';
-  intent.djLanguage = normalizeDjLanguage(djLanguage);
-
-  if (intent.action === 'next') {
-    broadcast({ type: 'control', action: 'next' });
-    return res.json({ action: 'next' });
-  }
-  if (intent.action === 'pause') {
-    broadcast({ type: 'control', action: 'pause' });
-    return res.json({ action: 'pause' });
-  }
-  if (intent.action === 'resume') {
-    broadcast({ type: 'control', action: 'resume' });
-    return res.json({ action: 'resume' });
-  }
-  if (intent.action === 'volume') {
-    broadcast({ type: 'control', action: 'volume', delta: intent.delta });
-    return res.json({ action: 'volume', delta: intent.delta });
-  }
-
-  if (intent.mode !== 'speech-only') {
-    enqueueJob({
-      type: 'program_start',
-      key: `program_start:${Date.now()}`,
-      input: intent.message,
-      source: autoRefill ? 'autoRefill' : 'user',
-      djLanguage: intent.djLanguage,
-    });
-    return res.json({ queued: true, jobType: 'program_start' });
-  }
-
-  await handleClaudeRequest(intent.message, res, intent, !!autoRefill);
-});
-
-app.post('/api/radio/refill', (req, res) => {
-  const {
-    programId,
-    sessionTitle,
-    currentTrack,
-    previousTrack,
-    previousIndex,
-    queue = [],
-    queueLength,
-    djLanguage,
-  } = req.body || {};
-  const effectiveProgramId = programId || stationState.programId || makeProgramId();
-  const effectiveQueueLength = Number.isInteger(queueLength) ? queueLength : Array.isArray(queue) ? queue.length : stationState.tracks.length;
-  const key = `music_refill:${effectiveProgramId}`;
-  const accepted = enqueueJob({
-    type: 'music_refill',
-    key,
-    programId: effectiveProgramId,
-    sessionTitle: sessionTitle || stationState.sessionTitle,
-    currentTrack,
-    previousTrack,
-    previousIndex,
-    queue: Array.isArray(queue) ? queue : [],
-    queueLength: effectiveQueueLength,
-    count: REFILL_TRACK_COUNT,
-    djLanguage: normalizeDjLanguage(djLanguage),
-  });
-  res.json({ queued: accepted, jobType: 'music_refill', programId: effectiveProgramId });
-});
-
-app.get('/api/now', (req, res) => {
-  res.json(nowPlaying || { playing: false });
-});
-
-app.get('/api/next', async (req, res) => {
-  broadcast({ type: 'control', action: 'next' });
-  res.json({ action: 'next' });
-});
-
-app.get('/api/taste', (req, res) => {
-  try {
-    const content = fs.readFileSync(path.join(__dirname, 'user/taste.md'), 'utf-8');
-    res.type('text/plain').send(content);
-  } catch {
-    res.status(404).json({ error: 'taste.md not found' });
-  }
-});
-
-app.get('/api/plan/today', (req, res) => {
-  const plan = getPref('today_plan');
-  res.json(plan || { message: '今日计划尚未生成' });
-});
-
-app.post('/api/tts/caller', async (req, res) => {
-  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-  if (!text) return res.status(400).json({ error: 'text required' });
-  if (text.length > 800) return res.status(400).json({ error: 'text too long' });
-
-  try {
-    const f = await synthesize(text, callerTtsOptions());
-    res.json({ ttsUrl: '/api/tts/' + path.basename(f) });
-  } catch (err) {
-    console.error('[caller-tts]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Serve cached TTS files
-app.get('/api/tts/:filename', (req, res) => {
-  const file = path.join(__dirname, 'cache/tts', req.params.filename);
-  if (!fs.existsSync(file)) return res.status(404).end();
-  res.sendFile(file);
-});
-
-// ── Boot ─────────────────────────────────────────────────────────────────────
-scheduler.init(broadcast, runRadioSegment);
-
-const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-  console.log(`\n[电台] Claudio FM 启动 → http://localhost:${PORT}`);
-  console.log(`[电台] 等待调度器或用户触发…\n`);
-});
+module.exports = { createApp, PRESETS, localTimeForHour };
