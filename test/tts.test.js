@@ -14,6 +14,8 @@ const VOLCENGINE_ENV_NAMES = [
   'VOLCENGINE_TTS_ACCESS_TOKEN',
   'VOLCENGINE_TTS_RESOURCE_ID',
   'VOLCENGINE_TTS_VOICE_TYPE',
+  'VOLCENGINE_TTS_ENDPOINT',
+  'VOLCENGINE_TTS_REQUEST_ID',
 ];
 
 async function withoutVolcengineEnv(run) {
@@ -33,36 +35,58 @@ async function withoutVolcengineEnv(run) {
   }
 }
 
-test('buildVolcengineHeaders uses legacy app ID and access token without a secret key', () => {
-  const headers = buildVolcengineHeaders({
-    appId: 'legacy-app-id',
-    accessToken: 'legacy-access-token',
-    resourceId: 'resource-id',
-    requestId: 'request-id',
-    secretKey: 'must-never-be-used',
-  });
+test('buildVolcengineHeaders uses legacy app ID and access token without a secret key', async () => {
+  await withoutVolcengineEnv(() => {
+    const headers = buildVolcengineHeaders({
+      appId: 'legacy-app-id',
+      accessToken: 'legacy-access-token',
+      resourceId: 'resource-id',
+      requestId: 'request-id',
+      secretKey: 'must-never-be-used',
+    });
 
-  assert.equal(headers['X-Api-App-Id'], 'legacy-app-id');
-  assert.equal(headers['X-Api-Access-Key'], 'legacy-access-token');
-  assert.equal(headers['X-Api-Resource-Id'], 'resource-id');
-  assert.equal(headers['X-Api-Request-Id'], 'request-id');
-  assert.equal(headers['X-Api-Key'], undefined);
-  assert.equal(JSON.stringify(headers).includes('must-never-be-used'), false);
-  assert.equal(Object.keys(headers).some(key => /secret/i.test(key)), false);
+    assert.equal(headers['X-Api-App-Id'], 'legacy-app-id');
+    assert.equal(headers['X-Api-Access-Key'], 'legacy-access-token');
+    assert.equal(headers['X-Api-Resource-Id'], 'resource-id');
+    assert.equal(headers['X-Api-Request-Id'], 'request-id');
+    assert.equal(headers['X-Api-Key'], undefined);
+    assert.equal(JSON.stringify(headers).includes('must-never-be-used'), false);
+    assert.equal(Object.keys(headers).some(key => /secret/i.test(key)), false);
+  });
 });
 
-test('buildVolcengineHeaders gives API key auth precedence over legacy credentials', () => {
-  const headers = buildVolcengineHeaders({
-    apiKey: 'new-api-key',
-    appId: 'legacy-app-id',
-    accessToken: 'legacy-access-token',
-    resourceId: 'resource-id',
-    requestId: 'request-id',
-  });
+test('buildVolcengineHeaders gives API key auth precedence over legacy credentials', async () => {
+  await withoutVolcengineEnv(() => {
+    const headers = buildVolcengineHeaders({
+      apiKey: 'new-api-key',
+      appId: 'legacy-app-id',
+      accessToken: 'legacy-access-token',
+      resourceId: 'resource-id',
+      requestId: 'request-id',
+    });
 
-  assert.equal(headers['X-Api-Key'], 'new-api-key');
-  assert.equal(headers['X-Api-App-Id'], undefined);
-  assert.equal(headers['X-Api-Access-Key'], undefined);
+    assert.equal(headers['X-Api-Key'], 'new-api-key');
+    assert.equal(headers['X-Api-App-Id'], undefined);
+    assert.equal(headers['X-Api-Access-Key'], undefined);
+  });
+});
+
+test('buildVolcengineHeaders generates a fresh request ID unless one is explicit', async () => {
+  await withoutVolcengineEnv(() => {
+    process.env.VOLCENGINE_TTS_REQUEST_ID = 'ambient-request-id';
+    const options = { apiKey: 'api-key', resourceId: 'resource-id' };
+    const first = buildVolcengineHeaders(options)['X-Api-Request-Id'];
+    const second = buildVolcengineHeaders(options)['X-Api-Request-Id'];
+    const explicit = buildVolcengineHeaders({
+      ...options,
+      requestId: 'explicit-request-id',
+    })['X-Api-Request-Id'];
+
+    assert.ok(first);
+    assert.ok(second);
+    assert.notEqual(first, second);
+    assert.equal(explicit, 'explicit-request-id');
+  });
 });
 
 test('incomplete legacy authentication is unconfigured and rejects before fetch', async () => {
@@ -88,26 +112,29 @@ test('incomplete legacy authentication is unconfigured and rejects before fetch'
   });
 });
 
-test('validateVolcengineEndpoint accepts only the official HTTPS TTS endpoint', () => {
-  assert.equal(
-    validateVolcengineEndpoint('https://openspeech.bytedance.com/api/v3/tts/unidirectional'),
-    true
-  );
-
-  const rejectedEndpoints = [
-    'http://openspeech.bytedance.com/api/v3/tts/unidirectional',
-    'https://example.com/api/v3/tts/unidirectional',
-    'https://openspeech.bytedance.com:8443/api/v3/tts/unidirectional',
-    'https://openspeech.bytedance.com/api/v3/tts/unidirectional?debug=1',
-    'https://openspeech.bytedance.com/api/v3/tts/unidirectional#fragment',
-    'https://user@openspeech.bytedance.com/api/v3/tts/unidirectional',
-  ];
-
-  for (const endpoint of rejectedEndpoints) {
-    assert.throws(
-      () => validateVolcengineEndpoint(endpoint),
-      /official HTTPS endpoint/,
-      endpoint
+test('validateVolcengineEndpoint accepts only the official HTTPS TTS endpoint', async () => {
+  await withoutVolcengineEnv(() => {
+    assert.equal(
+      validateVolcengineEndpoint('https://openspeech.bytedance.com/api/v3/tts/unidirectional'),
+      true
     );
-  }
+
+    const rejectedEndpoints = [
+      'http://openspeech.bytedance.com/api/v3/tts/unidirectional',
+      'https://example.com/api/v3/tts/unidirectional',
+      'https://openspeech.bytedance.com:8443/api/v3/tts/unidirectional',
+      'https://openspeech.bytedance.com/api/v3/tts/unidirectional?debug=1',
+      'https://openspeech.bytedance.com/api/v3/tts/unidirectional#fragment',
+      'https://user@openspeech.bytedance.com/api/v3/tts/unidirectional',
+      'not a url',
+    ];
+
+    for (const endpoint of rejectedEndpoints) {
+      assert.throws(
+        () => validateVolcengineEndpoint(endpoint),
+        /official HTTPS endpoint/,
+        endpoint
+      );
+    }
+  });
 });

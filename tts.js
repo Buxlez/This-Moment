@@ -13,7 +13,12 @@ function volcengineValue(options, optionName, envName) {
 }
 
 function validateVolcengineEndpoint(value = VOLCENGINE_DEFAULT_ENDPOINT) {
-  const url = new URL(value);
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Volcengine TTS credentials may only be sent to the official HTTPS endpoint.');
+  }
   if (
     url.protocol !== 'https:' ||
     url.hostname !== 'openspeech.bytedance.com' ||
@@ -34,7 +39,7 @@ function buildVolcengineHeaders(options = {}) {
   const appId = volcengineValue(options, 'appId', 'VOLCENGINE_TTS_APP_ID');
   const accessToken = volcengineValue(options, 'accessToken', 'VOLCENGINE_TTS_ACCESS_TOKEN');
   const resourceId = volcengineValue(options, 'resourceId', 'VOLCENGINE_TTS_RESOURCE_ID');
-  const requestId = volcengineValue(options, 'requestId', 'VOLCENGINE_TTS_REQUEST_ID') || crypto.randomUUID();
+  const requestId = options.requestId || crypto.randomUUID();
 
   if (!resourceId) {
     throw new Error('VOLCENGINE_TTS_RESOURCE_ID not set');
