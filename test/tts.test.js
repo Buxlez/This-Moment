@@ -93,12 +93,21 @@ test('validateVolcengineEndpoint accepts only the official HTTPS TTS endpoint', 
     validateVolcengineEndpoint('https://openspeech.bytedance.com/api/v3/tts/unidirectional'),
     true
   );
-  assert.throws(
-    () => validateVolcengineEndpoint('http://openspeech.bytedance.com/api/v3/tts/unidirectional'),
-    /official HTTPS endpoint/
-  );
-  assert.throws(
-    () => validateVolcengineEndpoint('https://example.com/api/v3/tts/unidirectional'),
-    /official HTTPS endpoint/
-  );
+
+  const rejectedEndpoints = [
+    'http://openspeech.bytedance.com/api/v3/tts/unidirectional',
+    'https://example.com/api/v3/tts/unidirectional',
+    'https://openspeech.bytedance.com:8443/api/v3/tts/unidirectional',
+    'https://openspeech.bytedance.com/api/v3/tts/unidirectional?debug=1',
+    'https://openspeech.bytedance.com/api/v3/tts/unidirectional#fragment',
+    'https://user@openspeech.bytedance.com/api/v3/tts/unidirectional',
+  ];
+
+  for (const endpoint of rejectedEndpoints) {
+    assert.throws(
+      () => validateVolcengineEndpoint(endpoint),
+      /official HTTPS endpoint/,
+      endpoint
+    );
+  }
 });

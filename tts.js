@@ -17,7 +17,12 @@ function validateVolcengineEndpoint(value = VOLCENGINE_DEFAULT_ENDPOINT) {
   if (
     url.protocol !== 'https:' ||
     url.hostname !== 'openspeech.bytedance.com' ||
-    url.pathname !== '/api/v3/tts/unidirectional'
+    url.port !== '' ||
+    url.pathname !== '/api/v3/tts/unidirectional' ||
+    url.search !== '' ||
+    url.hash !== '' ||
+    url.username !== '' ||
+    url.password !== ''
   ) {
     throw new Error('Volcengine TTS credentials may only be sent to the official HTTPS endpoint.');
   }
