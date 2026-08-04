@@ -27,6 +27,7 @@ const VOLCENGINE_ENV_NAMES = [
   'VOLCENGINE_TTS_FORMAT',
   'VOLCENGINE_TTS_SAMPLE_RATE',
   'VOLCENGINE_TTS_TIMEOUT_MS',
+  'VOLCENGINE_TTS_MAX_FRAME_BYTES',
 ];
 
 async function withoutVolcengineEnv(run) {
@@ -364,7 +365,7 @@ test('audio followed by clean EOF without completion is not published', async ()
   }));
 });
 
-test('cache identity includes canonical output settings and uses the format extension', async () => {
+test('cache identity includes canonical MP3 output settings', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const base = volcengineOptions(cacheDir, async () => { throw new Error('unused'); });
     const first = cachePath('identity', 'volcengine', {
@@ -385,18 +386,38 @@ test('cache identity includes canonical output settings and uses the format exte
       resourceId: 'another-resource',
       additions: JSON.stringify({ alpha: 1, beta: 2 }),
     });
-    const wav = cachePath('identity', 'volcengine', {
-      ...base,
-      format: 'wav',
-      additions: JSON.stringify({ alpha: 1, beta: 2 }),
-    });
-
     assert.equal(first, equivalent);
     assert.notEqual(first, differentRate);
     assert.notEqual(first, differentResource);
-    assert.notEqual(first, wav);
     assert.equal(path.extname(first), '.mp3');
-    assert.equal(path.extname(wav), '.wav');
+  }));
+});
+
+test('non-MP3 format or encoding rejects before fetch without creating cache files', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let fetchCalls = 0;
+    const fetchImpl = async () => {
+      fetchCalls++;
+      return streamingResponse([audioEvent('unexpected'), completionEvent()]);
+    };
+
+    await assert.rejects(
+      synthesize('wav format', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        format: 'wav',
+      }),
+      /MP3/i
+    );
+    await assert.rejects(
+      synthesize('wav encoding', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        encoding: 'wav',
+      }),
+      /MP3/i
+    );
+
+    assert.equal(fetchCalls, 0);
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
   }));
 });
 
@@ -525,5 +546,75 @@ test('request timeout clears in-flight state so the same cache key can retry', a
     assert.match(firstFailure.message, /timed out/i);
     assert.equal(fetchCalls, 2);
     assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-after-timeout'));
+  }));
+});
+
+test('oversized JSON frame fails at the configured limit without publishing files', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const oversizedFrame = `{"code":0,"message":"${'x'.repeat(100)}`;
+    const options = {
+      ...volcengineOptions(
+        cacheDir,
+        async () => webStreamingResponse(oversizedFrame)
+      ),
+      maxFrameBytes: 64,
+    };
+
+    await assert.rejects(
+      synthesize('oversized frame', options),
+      /JSON frame.*(?:64|large|limit|size)/i
+    );
+
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
+  }));
+});
+
+test('provider stream is cancelled when frame consumption fails', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let cancelled = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(JSON.stringify({
+          code: 40000001,
+          message: 'provider rejected request',
+        })));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = async () => new Response(body, { status: 200 });
+
+    await assert.rejects(
+      synthesize('cancel failed stream', volcengineOptions(cacheDir, fetchImpl)),
+      /response error/i
+    );
+
+    assert.equal(cancelled, true);
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
+  }));
+});
+
+test('credential values crossing the detail boundary are redacted before truncation', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const apiKey = 'SENSITIVE_HEADER_TOKEN_ABC123';
+    const body = `${'x'.repeat(1992)}${apiKey}tail`;
+    const fetchImpl = async () => new Response(body, { status: 500 });
+    let failure;
+
+    try {
+      await synthesize('boundary redaction', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        apiKey,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.ok(failure);
+    assert.equal(failure.message.includes(apiKey), false);
+    assert.equal(failure.message.includes(apiKey.slice(0, 3)), false);
+    assert.ok(failure.message.length <= 2040, failure.message.length);
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
   }));
 });
