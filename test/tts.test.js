@@ -26,6 +26,7 @@ const VOLCENGINE_ENV_NAMES = [
   'VOLCENGINE_TTS_ADDITIONS',
   'VOLCENGINE_TTS_FORMAT',
   'VOLCENGINE_TTS_SAMPLE_RATE',
+  'VOLCENGINE_TTS_TIMEOUT_MS',
 ];
 
 async function withoutVolcengineEnv(run) {
@@ -72,6 +73,38 @@ function streamingResponse(lines, boundaries = [1, 5, 11, 19, 37, 61]) {
     status: 200,
     body: Readable.from(chunks),
   };
+}
+
+function webStreamingResponse(text, boundaries = [1, 4, 9, 17, 31, 53]) {
+  const body = new TextEncoder().encode(text);
+  const chunks = [];
+  let offset = 0;
+
+  for (const boundary of boundaries) {
+    const nextOffset = Math.min(boundary, body.length);
+    if (nextOffset > offset) chunks.push(body.slice(offset, nextOffset));
+    offset = nextOffset;
+  }
+  if (offset < body.length) chunks.push(body.slice(offset));
+
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  }), { status: 200 });
+}
+
+function audioEvent(fragment, extra = {}) {
+  return JSON.stringify({
+    code: 0,
+    data: Buffer.from(fragment).toString('base64'),
+    ...extra,
+  });
+}
+
+function completionEvent(extra = {}) {
+  return JSON.stringify({ code: 20000000, ...extra });
 }
 
 function volcengineOptions(cacheDir, fetchImpl) {
@@ -197,12 +230,9 @@ test('synthesize assembles Volcengine NDJSON audio split across arbitrary stream
     const fetchImpl = async (endpoint, options) => {
       request = { endpoint, options };
       return streamingResponse([
-        JSON.stringify({ code: 20000000, message: 'started' }),
-        ...fragments.map(fragment => JSON.stringify({
-          code: 20000000,
-          data: Buffer.from(fragment).toString('base64'),
-        })),
-        JSON.stringify({ code: 20000000, message: 'finished' }),
+        JSON.stringify({ code: 0, message: 'started' }),
+        ...fragments.map(fragment => audioEvent(fragment)),
+        completionEvent({ message: 'finished' }),
       ]);
     };
 
@@ -247,10 +277,8 @@ test('concurrent synthesis for one cache key shares a single Volcengine request'
       fetchCalls++;
       await new Promise(resolve => setTimeout(resolve, 20));
       return streamingResponse([
-        JSON.stringify({
-          code: 20000000,
-          data: Buffer.from('ID3-shared').toString('base64'),
-        }),
+        audioEvent('ID3-shared'),
+        completionEvent(),
       ]);
     };
     const options = volcengineOptions(cacheDir, fetchImpl);
@@ -273,14 +301,12 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
       fetchCalls++;
       if (fetchCalls === 1) {
         return streamingResponse([
-          JSON.stringify({ code: 20000000, message: 'finished without audio' }),
+          completionEvent({ message: 'finished without audio' }),
         ]);
       }
       return streamingResponse([
-        JSON.stringify({
-          code: 20000000,
-          data: Buffer.from('ID3-retry').toString('base64'),
-        }),
+        audioEvent('ID3-retry'),
+        completionEvent(),
       ]);
     };
     const options = volcengineOptions(cacheDir, fetchImpl);
@@ -298,5 +324,206 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
     assert.equal(fetchCalls, 2);
     assert.equal(output, target);
     assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-retry'));
+  }));
+});
+
+test('synthesize parses adjacent JSON frames from a WHATWG response across byte chunks', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const frames = [
+      JSON.stringify({ code: 0, message: 'braces { } and quote " plus slash \\ stay inside' }),
+      audioEvent('ID3-adjacent-'),
+      audioEvent('frames'),
+      completionEvent({ message: 'done' }),
+    ];
+    const fetchImpl = async () => webStreamingResponse(` \n${frames.join('')} \t`);
+
+    const output = await synthesize(
+      'adjacent response frames',
+      volcengineOptions(cacheDir, fetchImpl)
+    );
+
+    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-adjacent-frames'));
+  }));
+});
+
+test('audio followed by clean EOF without completion is not published', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const options = volcengineOptions(
+      cacheDir,
+      async () => streamingResponse([audioEvent('ID3-incomplete')])
+    );
+    const target = cachePath('missing completion', 'volcengine', options);
+
+    await assert.rejects(
+      synthesize('missing completion', options),
+      /completion|terminal/i
+    );
+
+    assert.equal(fs.existsSync(target), false);
+    assert.deepEqual(fs.readdirSync(cacheDir), []);
+  }));
+});
+
+test('cache identity includes canonical output settings and uses the format extension', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const base = volcengineOptions(cacheDir, async () => { throw new Error('unused'); });
+    const first = cachePath('identity', 'volcengine', {
+      ...base,
+      additions: JSON.stringify({ beta: 2, alpha: 1 }),
+    });
+    const equivalent = cachePath('identity', 'volcengine', {
+      ...base,
+      additions: JSON.stringify({ alpha: 1, beta: 2 }),
+    });
+    const differentRate = cachePath('identity', 'volcengine', {
+      ...base,
+      sampleRate: 48000,
+      additions: JSON.stringify({ alpha: 1, beta: 2 }),
+    });
+    const differentResource = cachePath('identity', 'volcengine', {
+      ...base,
+      resourceId: 'another-resource',
+      additions: JSON.stringify({ alpha: 1, beta: 2 }),
+    });
+    const wav = cachePath('identity', 'volcengine', {
+      ...base,
+      format: 'wav',
+      additions: JSON.stringify({ alpha: 1, beta: 2 }),
+    });
+
+    assert.equal(first, equivalent);
+    assert.notEqual(first, differentRate);
+    assert.notEqual(first, differentResource);
+    assert.notEqual(first, wav);
+    assert.equal(path.extname(first), '.mp3');
+    assert.equal(path.extname(wav), '.wav');
+  }));
+});
+
+test('concurrent requests with different sample rates use separate synthesis work', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let fetchCalls = 0;
+    const fetchImpl = async (_endpoint, request) => {
+      fetchCalls++;
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const sampleRate = JSON.parse(request.body).req_params.audio_params.sample_rate;
+      return streamingResponse([
+        audioEvent(`ID3-${sampleRate}`),
+        completionEvent(),
+      ]);
+    };
+
+    const [lowRate, highRate] = await Promise.all([
+      synthesize('rate-specific', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        sampleRate: 24000,
+      }),
+      synthesize('rate-specific', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        sampleRate: 48000,
+      }),
+    ]);
+
+    assert.equal(fetchCalls, 2);
+    assert.notEqual(lowRate, highRate);
+    assert.deepEqual(fs.readFileSync(lowRate), Buffer.from('ID3-24000'));
+    assert.deepEqual(fs.readFileSync(highRate), Buffer.from('ID3-48000'));
+  }));
+});
+
+test('failed synthesis removes only its temp file and preserves a concurrently published cache', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let observedPartialTemp = false;
+    let target;
+    const fetchImpl = async () => ({
+      ok: true,
+      status: 200,
+      body: Readable.from((async function* () {
+        yield Buffer.from(audioEvent('ID3-partial'));
+        await new Promise(resolve => setImmediate(resolve));
+        observedPartialTemp = fs.readdirSync(cacheDir).some(name =>
+          name.startsWith(`${path.basename(target)}.`) && name.endsWith('.tmp')
+        );
+        fs.writeFileSync(target, Buffer.from('ID3-concurrent-winner'));
+        throw new Error('stream failed after partial audio');
+      })()),
+    });
+    const options = volcengineOptions(cacheDir, fetchImpl);
+    target = cachePath('atomic failure', 'volcengine', options);
+
+    await assert.rejects(synthesize('atomic failure', options), /stream failed/i);
+
+    assert.equal(observedPartialTemp, true);
+    assert.deepEqual(fs.readFileSync(target), Buffer.from('ID3-concurrent-winner'));
+    assert.deepEqual(
+      fs.readdirSync(cacheDir).filter(name => name.endsWith('.tmp')),
+      []
+    );
+  }));
+});
+
+test('HTTP error response detail is bounded while the response body is read', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let cancelled = false;
+    let emitted = false;
+    const body = new ReadableStream({
+      pull(controller) {
+        if (!emitted) {
+          emitted = true;
+          controller.enqueue(new TextEncoder().encode('x'.repeat(5000)));
+          return;
+        }
+        controller.enqueue(new TextEncoder().encode('must-not-be-read'));
+        controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = async () => new Response(body, { status: 500 });
+    let failure;
+
+    try {
+      await synthesize('bounded error body', volcengineOptions(cacheDir, fetchImpl));
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.ok(failure);
+    assert.match(failure.message, /Volcengine TTS error 500/);
+    assert.ok(failure.message.length <= 2040, failure.message.length);
+    assert.equal(cancelled, true);
+  }));
+});
+
+test('request timeout clears in-flight state so the same cache key can retry', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    let fetchCalls = 0;
+    const fetchImpl = async () => {
+      fetchCalls++;
+      if (fetchCalls === 1) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return streamingResponse([audioEvent('too-late'), completionEvent()]);
+      }
+      return streamingResponse([audioEvent('ID3-after-timeout'), completionEvent()]);
+    };
+    const options = {
+      ...volcengineOptions(cacheDir, fetchImpl),
+      timeoutMs: 5,
+    };
+    let firstFailure;
+
+    try {
+      await synthesize('timeout retry', options);
+    } catch (error) {
+      firstFailure = error;
+    }
+    options.timeoutMs = 100;
+    const output = await synthesize('timeout retry', options);
+
+    assert.ok(firstFailure);
+    assert.match(firstFailure.message, /timed out/i);
+    assert.equal(fetchCalls, 2);
+    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-after-timeout'));
   }));
 });
