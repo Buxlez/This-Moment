@@ -14,6 +14,10 @@ const {
 } = require('../tts');
 
 const VOLCENGINE_ENDPOINT = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
+const VALID_MP3 = Buffer.from([
+  0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xff, 0xfb, 0x90, 0x64, 0x00, 0x01,
+]);
 
 const VOLCENGINE_ENV_NAMES = [
   'VOLCENGINE_TTS_API_KEY',
@@ -226,7 +230,7 @@ test('validateVolcengineEndpoint accepts only the official HTTPS TTS endpoint', 
 
 test('synthesize assembles Volcengine NDJSON audio split across arbitrary stream chunks', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
-    const fragments = ['ID3-', 'one-', 'two'];
+    const fragments = [VALID_MP3.subarray(0, 2), VALID_MP3.subarray(2, 11), VALID_MP3.subarray(11)];
     let request;
     const fetchImpl = async (endpoint, options) => {
       request = { endpoint, options };
@@ -240,7 +244,7 @@ test('synthesize assembles Volcengine NDJSON audio split across arbitrary stream
     const output = await synthesize('streamed response', volcengineOptions(cacheDir, fetchImpl));
 
     assert.equal(path.dirname(output), cacheDir);
-    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-one-two'));
+    assert.deepEqual(fs.readFileSync(output), VALID_MP3);
     assert.equal(request.endpoint, VOLCENGINE_ENDPOINT);
     assert.equal(request.options.method, 'POST');
     assert.equal(request.options.headers['X-Api-Key'], 'test-api-key');
@@ -278,7 +282,7 @@ test('concurrent synthesis for one cache key shares a single Volcengine request'
       fetchCalls++;
       await new Promise(resolve => setTimeout(resolve, 20));
       return streamingResponse([
-        audioEvent('ID3-shared'),
+        audioEvent(VALID_MP3),
         completionEvent(),
       ]);
     };
@@ -291,7 +295,7 @@ test('concurrent synthesis for one cache key shares a single Volcengine request'
 
     assert.equal(fetchCalls, 1);
     assert.equal(first, second);
-    assert.deepEqual(fs.readFileSync(first), Buffer.from('ID3-shared'));
+    assert.deepEqual(fs.readFileSync(first), VALID_MP3);
   }));
 });
 
@@ -306,7 +310,7 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
         ]);
       }
       return streamingResponse([
-        audioEvent('ID3-retry'),
+        audioEvent(VALID_MP3),
         completionEvent(),
       ]);
     };
@@ -324,7 +328,7 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
     const output = await synthesize('retry after failure', options);
     assert.equal(fetchCalls, 2);
     assert.equal(output, target);
-    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-retry'));
+    assert.deepEqual(fs.readFileSync(output), VALID_MP3);
   }));
 });
 
@@ -351,7 +355,7 @@ test('synthesize replaces an invalid cached artifact instead of returning it', a
     let fetchCalls = 0;
     const options = volcengineOptions(cacheDir, async () => {
       fetchCalls += 1;
-      return streamingResponse([audioEvent('ID3-replacement'), completionEvent()]);
+      return streamingResponse([audioEvent(VALID_MP3), completionEvent()]);
     });
     const target = cachePath('invalid cached audio', 'volcengine', options);
     fs.writeFileSync(target, Buffer.from('cached text'));
@@ -360,7 +364,7 @@ test('synthesize replaces an invalid cached artifact instead of returning it', a
 
     assert.equal(output, target);
     assert.equal(fetchCalls, 1);
-    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-replacement'));
+    assert.deepEqual(fs.readFileSync(output), VALID_MP3);
   }));
 });
 
@@ -368,8 +372,8 @@ test('synthesize parses adjacent JSON frames from a WHATWG response across byte 
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const frames = [
       JSON.stringify({ code: 0, message: 'braces { } and quote " plus slash \\ stay inside' }),
-      audioEvent('ID3-adjacent-'),
-      audioEvent('frames'),
+      audioEvent(VALID_MP3.subarray(0, 7)),
+      audioEvent(VALID_MP3.subarray(7)),
       completionEvent({ message: 'done' }),
     ];
     const fetchImpl = async () => webStreamingResponse(` \n${frames.join('')} \t`);
@@ -379,7 +383,7 @@ test('synthesize parses adjacent JSON frames from a WHATWG response across byte 
       volcengineOptions(cacheDir, fetchImpl)
     );
 
-    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-adjacent-frames'));
+    assert.deepEqual(fs.readFileSync(output), VALID_MP3);
   }));
 });
 
@@ -387,7 +391,7 @@ test('audio followed by clean EOF without completion is not published', async ()
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const options = volcengineOptions(
       cacheDir,
-      async () => streamingResponse([audioEvent('ID3-incomplete')])
+      async () => streamingResponse([audioEvent(VALID_MP3)])
     );
     const target = cachePath('missing completion', 'volcengine', options);
 
@@ -464,8 +468,9 @@ test('concurrent requests with different sample rates use separate synthesis wor
       fetchCalls++;
       await new Promise(resolve => setTimeout(resolve, 10));
       const sampleRate = JSON.parse(request.body).req_params.audio_params.sample_rate;
+      const audio = Buffer.concat([VALID_MP3, Buffer.from(String(sampleRate))]);
       return streamingResponse([
-        audioEvent(`ID3-${sampleRate}`),
+        audioEvent(audio),
         completionEvent(),
       ]);
     };
@@ -483,8 +488,8 @@ test('concurrent requests with different sample rates use separate synthesis wor
 
     assert.equal(fetchCalls, 2);
     assert.notEqual(lowRate, highRate);
-    assert.deepEqual(fs.readFileSync(lowRate), Buffer.from('ID3-24000'));
-    assert.deepEqual(fs.readFileSync(highRate), Buffer.from('ID3-48000'));
+    assert.deepEqual(fs.readFileSync(lowRate), Buffer.concat([VALID_MP3, Buffer.from('24000')]));
+    assert.deepEqual(fs.readFileSync(highRate), Buffer.concat([VALID_MP3, Buffer.from('48000')]));
   }));
 });
 
@@ -496,12 +501,12 @@ test('failed synthesis removes only its temp file and preserves a concurrently p
       ok: true,
       status: 200,
       body: Readable.from((async function* () {
-        yield Buffer.from(audioEvent('ID3-partial'));
+        yield Buffer.from(audioEvent(VALID_MP3.subarray(0, 8)));
         await new Promise(resolve => setImmediate(resolve));
         observedPartialTemp = fs.readdirSync(cacheDir).some(name =>
           name.startsWith(`${path.basename(target)}.`) && name.endsWith('.tmp')
         );
-        fs.writeFileSync(target, Buffer.from('ID3-concurrent-winner'));
+        fs.writeFileSync(target, VALID_MP3);
         throw new Error('stream failed after partial audio');
       })()),
     });
@@ -511,7 +516,7 @@ test('failed synthesis removes only its temp file and preserves a concurrently p
     await assert.rejects(synthesize('atomic failure', options), /stream failed/i);
 
     assert.equal(observedPartialTemp, true);
-    assert.deepEqual(fs.readFileSync(target), Buffer.from('ID3-concurrent-winner'));
+    assert.deepEqual(fs.readFileSync(target), VALID_MP3);
     assert.deepEqual(
       fs.readdirSync(cacheDir).filter(name => name.endsWith('.tmp')),
       []
@@ -560,9 +565,9 @@ test('request timeout clears in-flight state so the same cache key can retry', a
       fetchCalls++;
       if (fetchCalls === 1) {
         await new Promise(resolve => setTimeout(resolve, 50));
-        return streamingResponse([audioEvent('too-late'), completionEvent()]);
+        return streamingResponse([audioEvent(VALID_MP3), completionEvent()]);
       }
-      return streamingResponse([audioEvent('ID3-after-timeout'), completionEvent()]);
+      return streamingResponse([audioEvent(VALID_MP3), completionEvent()]);
     };
     const options = {
       ...volcengineOptions(cacheDir, fetchImpl),
@@ -581,7 +586,7 @@ test('request timeout clears in-flight state so the same cache key can retry', a
     assert.ok(firstFailure);
     assert.match(firstFailure.message, /timed out/i);
     assert.equal(fetchCalls, 2);
-    assert.deepEqual(fs.readFileSync(output), Buffer.from('ID3-after-timeout'));
+    assert.deepEqual(fs.readFileSync(output), VALID_MP3);
   }));
 });
 

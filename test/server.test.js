@@ -12,6 +12,10 @@ const defaultTts = require('../tts');
 const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
 const HASHED_MP3 = '0123456789abcdef0123456789abcdef.mp3';
 const OTHER_HASHED_MP3 = 'abcdef0123456789abcdef0123456789.mp3';
+const VALID_MP3 = Buffer.from([
+  0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0xff, 0xfb, 0x90, 0x64, 0x00, 0x01,
+]);
 
 function fakeCard(sessionId = 's1') {
   return {
@@ -234,7 +238,7 @@ test('internally created pipeline receives the configured artifact trust boundar
 test('TTS retry publishes one ready update and returns a servable MP3 URL', async t => {
   const card = fakeCard('retry-session');
   const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-tts-cache-test-'));
-  const audio = Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x54, 0x54, 0x53]);
+  const audio = VALID_MP3;
   const audioPath = path.join(ttsCacheDir, HASHED_MP3);
   fs.writeFileSync(audioPath, audio);
   t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
@@ -314,8 +318,8 @@ test('retry and serving reject untrusted artifact names, paths, contents, and sy
   const symlinkPath = path.join(ttsCacheDir, OTHER_HASHED_MP3);
   const arbitraryPath = path.join(ttsCacheDir, 'retry_voice.mp3');
   fs.writeFileSync(textPath, Buffer.from('not audio'));
-  fs.writeFileSync(outsidePath, Buffer.from('ID3-outside'));
-  fs.writeFileSync(arbitraryPath, Buffer.from('ID3-arbitrary'));
+  fs.writeFileSync(outsidePath, VALID_MP3);
+  fs.writeFileSync(arbitraryPath, VALID_MP3);
   fs.symlinkSync(outsidePath, symlinkPath);
 
   const card = fakeCard('security-session');
@@ -355,11 +359,34 @@ test('retry and serving reject untrusted artifact names, paths, contents, and sy
     .every(update => update.error === PUBLIC_TTS_ERROR), true);
 });
 
+test('serving rejects a cache-root symlink swap and preserves the outside artifact', async t => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'server-root-swap-test-'));
+  const ttsCacheDir = path.join(parent, 'cache');
+  const movedRoot = path.join(parent, 'original-cache');
+  const outsideRoot = path.join(parent, 'outside');
+  const outsideArtifact = path.join(outsideRoot, HASHED_MP3);
+  fs.mkdirSync(ttsCacheDir);
+  fs.mkdirSync(outsideRoot);
+  const instance = createApp(serverDependencies({ ttsCacheDir }));
+  const base = await listen(instance);
+  t.after(() => instance.close());
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }));
+
+  fs.writeFileSync(outsideArtifact, VALID_MP3);
+  fs.renameSync(ttsCacheDir, movedRoot);
+  fs.symlinkSync(outsideRoot, ttsCacheDir);
+
+  const response = await fetch(`${base}/api/tts/${HASHED_MP3}`);
+
+  assert.notEqual(response.status, 200);
+  assert.deepEqual(fs.readFileSync(outsideArtifact), VALID_MP3);
+});
+
 test('concurrent successful retries share one attempt and later retry runs after cleanup', async t => {
   const card = fakeCard('concurrent-session');
   const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-retry-concurrency-test-'));
   const audioPath = path.join(ttsCacheDir, HASHED_MP3);
-  fs.writeFileSync(audioPath, Buffer.from('ID3-concurrent'));
+  fs.writeFileSync(audioPath, VALID_MP3);
   t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
   const updates = [];
   let synthCalls = 0;
@@ -434,7 +461,7 @@ test('concurrent retry cannot let a would-be follower failure overwrite owner su
   const card = fakeCard('owner-session');
   const ttsCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'server-retry-owner-test-'));
   const audioPath = path.join(ttsCacheDir, HASHED_MP3);
-  fs.writeFileSync(audioPath, Buffer.from('ID3-owner'));
+  fs.writeFileSync(audioPath, VALID_MP3);
   t.after(() => fs.rmSync(ttsCacheDir, { recursive: true, force: true }));
   const updates = [];
   let synthCalls = 0;

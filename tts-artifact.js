@@ -2,7 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const TTS_ARTIFACT_FILENAME = /^[a-f0-9]{32}\.mp3$/;
-const MAX_HEADER_BYTES = 10;
+const ID3_HEADER_BYTES = 10;
+const MPEG_HEADER_BYTES = 4;
 
 function artifactError(code, message, identity) {
   const error = new Error(message);
@@ -11,8 +12,7 @@ function artifactError(code, message, identity) {
   return error;
 }
 
-function plausibleMp3Header(header) {
-  if (header.length >= 3 && header.subarray(0, 3).equals(Buffer.from('ID3'))) return true;
+function plausibleMpegHeader(header) {
   if (header.length < 4 || header[0] !== 0xff || (header[1] & 0xe0) !== 0xe0) return false;
   const version = (header[1] >> 3) & 0x03;
   const layer = (header[1] >> 1) & 0x03;
@@ -22,8 +22,75 @@ function plausibleMp3Header(header) {
     && bitrate !== 0x00 && bitrate !== 0x0f && sampleRate !== 0x03;
 }
 
+function id3AudioOffset(header, fileSize) {
+  if (header.length < ID3_HEADER_BYTES) return null;
+  const version = header[3];
+  const revision = header[4];
+  const flags = header[5];
+  const allowedFlags = { 2: 0xc0, 3: 0xe0, 4: 0xf0 }[version];
+  if (allowedFlags === undefined || revision === 0xff || (flags & ~allowedFlags) !== 0) {
+    return null;
+  }
+  const sizeBytes = header.subarray(6, 10);
+  if (sizeBytes.some(byte => (byte & 0x80) !== 0)) return null;
+  const tagSize = sizeBytes.reduce((size, byte) => (size * 128) + byte, 0);
+  const audioOffset = ID3_HEADER_BYTES + tagSize;
+  if (!Number.isSafeInteger(audioOffset) || audioOffset > fileSize) return null;
+  return audioOffset;
+}
+
+function plausibleMp3Header(header) {
+  if (header.length >= 3 && header.subarray(0, 3).equals(Buffer.from('ID3'))) {
+    const audioOffset = id3AudioOffset(header.subarray(0, ID3_HEADER_BYTES), header.length);
+    return audioOffset !== null
+      && audioOffset + MPEG_HEADER_BYTES <= header.length
+      && plausibleMpegHeader(header.subarray(audioOffset, audioOffset + MPEG_HEADER_BYTES));
+  }
+  return plausibleMpegHeader(header.subarray(0, MPEG_HEADER_BYTES));
+}
+
 function createTtsArtifactStore(cacheDir) {
   const root = path.resolve(cacheDir);
+  let pinnedRoot;
+
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    const before = fs.lstatSync(root);
+    if (before.isSymbolicLink() || !before.isDirectory()) {
+      throw artifactError('INVALID_TTS_CACHE_ROOT', 'TTS cache root must be a real directory.');
+    }
+    const canonical = fs.realpathSync(root);
+    const after = fs.lstatSync(root);
+    if (after.isSymbolicLink() || !after.isDirectory()
+      || before.dev !== after.dev || before.ino !== after.ino
+      || fs.realpathSync(root) !== canonical) {
+      throw artifactError('INVALID_TTS_CACHE_ROOT', 'TTS cache root changed during initialization.');
+    }
+    pinnedRoot = { canonical, dev: after.dev, ino: after.ino };
+  } catch (error) {
+    if (error.code === 'INVALID_TTS_CACHE_ROOT') throw error;
+    throw artifactError('INVALID_TTS_CACHE_ROOT', 'Unable to establish the TTS cache root.');
+  }
+
+  async function requirePinnedRoot() {
+    try {
+      const before = await fs.promises.lstat(root);
+      if (before.isSymbolicLink() || !before.isDirectory()) {
+        throw artifactError('INVALID_TTS_CACHE_ROOT', 'TTS cache root is no longer trusted.');
+      }
+      const canonical = await fs.promises.realpath(root);
+      const after = await fs.promises.lstat(root);
+      if (after.isSymbolicLink() || !after.isDirectory()
+        || before.dev !== after.dev || before.ino !== after.ino
+        || after.dev !== pinnedRoot.dev || after.ino !== pinnedRoot.ino
+        || canonical !== pinnedRoot.canonical) {
+        throw artifactError('INVALID_TTS_CACHE_ROOT', 'TTS cache root is no longer trusted.');
+      }
+    } catch (error) {
+      if (error.code === 'INVALID_TTS_CACHE_ROOT') throw error;
+      throw artifactError('INVALID_TTS_CACHE_ROOT', 'Unable to verify the TTS cache root.');
+    }
+  }
 
   function resolveFilename(filename) {
     if (typeof filename !== 'string' || !TTS_ARTIFACT_FILENAME.test(filename)) {
@@ -46,6 +113,7 @@ function createTtsArtifactStore(cacheDir) {
   }
 
   async function openResolved(resolved) {
+    await requirePinnedRoot();
     let before;
     try {
       before = await fs.promises.lstat(resolved.path);
@@ -55,8 +123,11 @@ function createTtsArtifactStore(cacheDir) {
       }
       throw artifactError('INVALID_TTS_ARTIFACT', 'Unable to inspect TTS artifact.');
     }
-    if (before.isSymbolicLink() || !before.isFile()) {
-      throw artifactError('INVALID_TTS_ARTIFACT', 'TTS artifact must be a regular non-symlink file.');
+    if (before.isSymbolicLink() || !before.isFile() || before.nlink !== 1) {
+      throw artifactError(
+        'INVALID_TTS_ARTIFACT',
+        'TTS artifact must be a singly-linked regular non-symlink file.'
+      );
     }
 
     const noFollow = fs.constants.O_NOFOLLOW || 0;
@@ -69,13 +140,31 @@ function createTtsArtifactStore(cacheDir) {
 
     try {
       const stats = await handle.stat();
-      const identity = { dev: stats.dev, ino: stats.ino };
-      if (!stats.isFile() || stats.dev !== before.dev || stats.ino !== before.ino) {
+      if (!stats.isFile() || stats.nlink !== 1
+        || stats.dev !== before.dev || stats.ino !== before.ino) {
         throw artifactError('INVALID_TTS_ARTIFACT', 'TTS artifact changed during validation.');
       }
-      const header = Buffer.alloc(Math.min(MAX_HEADER_BYTES, stats.size));
-      const { bytesRead } = await handle.read(header, 0, header.length, 0);
-      if (!plausibleMp3Header(header.subarray(0, bytesRead))) {
+      const identity = { dev: stats.dev, ino: stats.ino, nlink: stats.nlink };
+      await requirePinnedRoot();
+
+      const initialLength = Math.min(ID3_HEADER_BYTES, stats.size);
+      const initial = Buffer.alloc(initialLength);
+      const { bytesRead } = await handle.read(initial, 0, initial.length, 0);
+      let validAudio = false;
+      if (bytesRead >= 3 && initial.subarray(0, 3).equals(Buffer.from('ID3'))) {
+        const audioOffset = id3AudioOffset(initial.subarray(0, bytesRead), stats.size);
+        if (audioOffset !== null && audioOffset + MPEG_HEADER_BYTES <= stats.size) {
+          const mpegHeader = Buffer.alloc(MPEG_HEADER_BYTES);
+          const audioRead = await handle.read(
+            mpegHeader, 0, MPEG_HEADER_BYTES, audioOffset
+          );
+          validAudio = audioRead.bytesRead === MPEG_HEADER_BYTES
+            && plausibleMpegHeader(mpegHeader);
+        }
+      } else if (bytesRead >= MPEG_HEADER_BYTES) {
+        validAudio = plausibleMpegHeader(initial.subarray(0, MPEG_HEADER_BYTES));
+      }
+      if (!validAudio) {
         throw artifactError('INVALID_TTS_ARTIFACT_AUDIO', 'TTS artifact is not valid MP3 audio.', identity);
       }
       return { ...resolved, handle, stats };
@@ -107,10 +196,20 @@ function createTtsArtifactStore(cacheDir) {
       })();
       if (resolved && error.artifactIdentity) {
         try {
+          await requirePinnedRoot();
           const current = await fs.promises.lstat(resolved.path);
           if (current.isFile() && !current.isSymbolicLink()
+            && current.nlink === 1
             && current.dev === error.artifactIdentity.dev
             && current.ino === error.artifactIdentity.ino) {
+            await requirePinnedRoot();
+            const confirmed = await fs.promises.lstat(resolved.path);
+            if (!confirmed.isFile() || confirmed.isSymbolicLink()
+              || confirmed.nlink !== 1
+              || confirmed.dev !== error.artifactIdentity.dev
+              || confirmed.ino !== error.artifactIdentity.ino) {
+              throw artifactError('INVALID_TTS_ARTIFACT', 'TTS artifact changed before cleanup.');
+            }
             await fs.promises.unlink(resolved.path);
           }
         } catch (cleanupError) {
