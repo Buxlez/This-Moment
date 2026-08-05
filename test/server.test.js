@@ -12,9 +12,11 @@ const defaultTts = require('../tts');
 const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
 const HASHED_MP3 = '0123456789abcdef0123456789abcdef.mp3';
 const OTHER_HASHED_MP3 = 'abcdef0123456789abcdef0123456789.mp3';
-const VALID_MP3 = Buffer.from([
-  0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0xff, 0xfb, 0x90, 0x64, 0x00, 0x01,
+const MPEG_FRAME = Buffer.alloc(52);
+Buffer.from([0xff, 0xe3, 0x10, 0x00]).copy(MPEG_FRAME);
+const VALID_MP3 = Buffer.concat([
+  Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+  MPEG_FRAME,
 ]);
 
 function fakeCard(sessionId = 's1') {

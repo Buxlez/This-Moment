@@ -17,7 +17,8 @@ test('exports a central TTS artifact store factory', () => {
 
 const HASHED_MP3 = '0123456789abcdef0123456789abcdef.mp3';
 const OTHER_HASHED_MP3 = 'abcdef0123456789abcdef0123456789.mp3';
-const MPEG_FRAME = Buffer.from([0xff, 0xfb, 0x90, 0x64, 0x00, 0x01]);
+const MPEG_FRAME = Buffer.alloc(52);
+Buffer.from([0xff, 0xe3, 0x10, 0x00]).copy(MPEG_FRAME);
 const ID3_AUDIO = Buffer.concat([
   Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
   MPEG_FRAME,
@@ -84,7 +85,7 @@ test('rejects arbitrary names, traversal, outside paths, symlinks, and non-audio
   await assert.rejects(store.openArtifact(OTHER_HASHED_MP3), /symlink|artifact|file/i);
 });
 
-test('generated-artifact cleanup removes only invalid regular files inside the cache root', async t => {
+test('generated-artifact validation never unlinks published final-path artifacts', async t => {
   const { cacheDir, parent, store } = temporaryStore(t);
   assert.equal(typeof store.validateGeneratedArtifact, 'function');
   const invalidInside = path.join(cacheDir, HASHED_MP3);
@@ -95,7 +96,7 @@ test('generated-artifact cleanup removes only invalid regular files inside the c
   fs.symlinkSync(invalidOutside, symlinkPath);
 
   await assert.rejects(store.validateGeneratedArtifact(invalidInside), /MP3|artifact|audio/i);
-  assert.equal(fs.existsSync(invalidInside), false);
+  assert.equal(fs.existsSync(invalidInside), true);
 
   await assert.rejects(store.validateGeneratedArtifact(invalidOutside), /artifact|filename|cache/i);
   assert.equal(fs.existsSync(invalidOutside), true);
@@ -161,6 +162,34 @@ test('accepts complete ID3v2 plus MPEG audio and MPEG-only audio', async t => {
   assert.equal((await store.validateArtifactPath(untagged)).size, MPEG_AUDIO.length);
 });
 
+test('accepts supported ID3 versions, nonzero syncsafe tags, and an ID3v2.4 footer', async t => {
+  const examples = [
+    Buffer.concat([
+      Buffer.from([0x49, 0x44, 0x33, 0x02, 0, 0, 0, 0, 0, 3]),
+      Buffer.from([1, 2, 3]),
+      MPEG_FRAME,
+    ]),
+    Buffer.concat([
+      Buffer.from([0x49, 0x44, 0x33, 0x03, 0, 0, 0, 0, 0, 3]),
+      Buffer.from([1, 2, 3]),
+      MPEG_FRAME,
+    ]),
+    Buffer.concat([
+      Buffer.from([0x49, 0x44, 0x33, 0x04, 0, 0x10, 0, 0, 0, 3]),
+      Buffer.from([1, 2, 3]),
+      Buffer.from([0x33, 0x44, 0x49, 0x04, 0, 0x10, 0, 0, 0, 3]),
+      MPEG_FRAME,
+    ]),
+  ];
+
+  for (const [index, bytes] of examples.entries()) {
+    const { cacheDir, store } = temporaryStore(t);
+    const filename = `${String(index + 40).padStart(32, '0')}.mp3`;
+    fs.writeFileSync(path.join(cacheDir, filename), bytes);
+    assert.equal((await store.validateArtifactPath(path.join(cacheDir, filename))).size, bytes.length);
+  }
+});
+
 test('rejects malformed ID3 headers and ID3-only files', async t => {
   const malformed = [
     { name: 'three-byte ID3', bytes: Buffer.from('ID3') },
@@ -173,6 +202,7 @@ test('rejects malformed ID3 headers and ID3-only files', async t => {
     { name: 'non-syncsafe ID3 size', bytes: Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x80, 0, 0, 0, ...MPEG_FRAME]) },
     { name: 'ID3 size beyond file', bytes: Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0, 0, 0, 0x20, ...MPEG_FRAME]) },
     { name: 'ID3 only', bytes: Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0, 0, 0, 0]) },
+    { name: 'MPEG header without a complete frame', bytes: Buffer.from([0xff, 0xe3, 0x10, 0x00]) },
   ];
 
   for (const [index, example] of malformed.entries()) {

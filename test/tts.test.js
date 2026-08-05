@@ -14,10 +14,17 @@ const {
 } = require('../tts');
 
 const VOLCENGINE_ENDPOINT = 'https://openspeech.bytedance.com/api/v3/tts/unidirectional';
-const VALID_MP3 = Buffer.from([
-  0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0xff, 0xfb, 0x90, 0x64, 0x00, 0x01,
-]);
+function mp3Fixture(marker = 0) {
+  const frame = Buffer.alloc(52);
+  Buffer.from([0xff, 0xe3, 0x10, 0x00]).copy(frame);
+  frame[frame.length - 1] = marker;
+  return Buffer.concat([
+    Buffer.from([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    frame,
+  ]);
+}
+
+const VALID_MP3 = mp3Fixture();
 
 const VOLCENGINE_ENV_NAMES = [
   'VOLCENGINE_TTS_API_KEY',
@@ -299,7 +306,7 @@ test('concurrent synthesis for one cache key shares a single Volcengine request'
   }));
 });
 
-test('failed synthesis removes unusable cache state and permits a clean retry', async () => {
+test('failed synthesis preserves published cache state and permits a clean retry', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     let fetchCalls = 0;
     const fetchImpl = async () => {
@@ -323,7 +330,8 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
       synthesize('retry after failure', options),
       /no audio|empty|usable/i
     );
-    assert.equal(fs.existsSync(target), false);
+    assert.equal(fs.existsSync(target), true);
+    assert.equal(fs.statSync(target).size, 0);
 
     const output = await synthesize('retry after failure', options);
     assert.equal(fetchCalls, 2);
@@ -332,7 +340,7 @@ test('failed synthesis removes unusable cache state and permits a clean retry', 
   }));
 });
 
-test('synthesize rejects and removes a provider artifact without MP3 framing', async () => {
+test('synthesize rejects without unlinking a published provider artifact lacking MP3 framing', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const options = volcengineOptions(
       cacheDir,
@@ -345,8 +353,8 @@ test('synthesize rejects and removes a provider artifact without MP3 framing', a
       /MP3|artifact|audio/i
     );
 
-    assert.equal(fs.existsSync(target), false);
-    assert.deepEqual(fs.readdirSync(cacheDir), []);
+    assert.equal(fs.existsSync(target), true);
+    assert.deepEqual(fs.readFileSync(target), Buffer.from('plain text bytes'));
   }));
 });
 
@@ -468,7 +476,7 @@ test('concurrent requests with different sample rates use separate synthesis wor
       fetchCalls++;
       await new Promise(resolve => setTimeout(resolve, 10));
       const sampleRate = JSON.parse(request.body).req_params.audio_params.sample_rate;
-      const audio = Buffer.concat([VALID_MP3, Buffer.from(String(sampleRate))]);
+      const audio = mp3Fixture(sampleRate === 24000 ? 24 : 48);
       return streamingResponse([
         audioEvent(audio),
         completionEvent(),
@@ -488,8 +496,8 @@ test('concurrent requests with different sample rates use separate synthesis wor
 
     assert.equal(fetchCalls, 2);
     assert.notEqual(lowRate, highRate);
-    assert.deepEqual(fs.readFileSync(lowRate), Buffer.concat([VALID_MP3, Buffer.from('24000')]));
-    assert.deepEqual(fs.readFileSync(highRate), Buffer.concat([VALID_MP3, Buffer.from('48000')]));
+    assert.deepEqual(fs.readFileSync(lowRate), mp3Fixture(24));
+    assert.deepEqual(fs.readFileSync(highRate), mp3Fixture(48));
   }));
 });
 
