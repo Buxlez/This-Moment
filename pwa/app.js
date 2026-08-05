@@ -5,6 +5,10 @@
     RequestGate, TtsState, PollController, reconcileCard, narrationView, captureCardUiState, restoreCardUiState,
     selectGenerationCards, syncNarrationControl, activateNarrationControl,
   } = window.ThisMomentAppModel;
+  const GENERATION_POLL_CONFIG = Object.freeze({
+    initialDelay: 3000,
+    retryDelays: Object.freeze([4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000]),
+  });
   const $ = selector => document.querySelector(selector);
   const elements = {
     form: $('#recommendationForm'), input: $('#momentInput'), send: $('#sendButton'),
@@ -40,7 +44,7 @@
   });
   const generationPoller = new PollController({
     task: pollGeneration,
-    retryDelays: [1600, 2400, 4000],
+    retryDelays: GENERATION_POLL_CONFIG.retryDelays,
     onComplete: finishPolledGeneration,
     onExhausted() {
       state.generating = false;
@@ -450,7 +454,7 @@
       });
       elements.input.value = '';
       resizeComposer();
-      generationPoller.start(1800);
+      generationPoller.start(GENERATION_POLL_CONFIG.initialDelay);
     } catch (error) {
       state.generating = false; elements.send.disabled = false; elements.progress.hidden = true; showToast(error.message);
     }

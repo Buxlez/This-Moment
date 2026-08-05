@@ -6,6 +6,17 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 
+function readGenerationPollConfig(source) {
+  const declaration = source.match(
+    /const GENERATION_POLL_CONFIG = Object\.freeze\(\{\s*initialDelay:\s*(\d+),\s*retryDelays:\s*Object\.freeze\(\[([^\]]+)\]\),?\s*\}\);/,
+  );
+  assert.ok(declaration, 'generation polling must declare one named immutable configuration');
+  return {
+    initialDelay: Number(declaration[1]),
+    retryDelays: declaration[2].split(',').map(value => Number(value.trim())),
+  };
+}
+
 test('desktop UI is structured as an accessible card conversation', () => {
   const html = read('pwa/index.html');
 
@@ -127,11 +138,24 @@ test('hydration reconciles card identity before replaying queued socket events',
   assert.match(initialize, /reconcileSnapshots\([^)]+\)[\s\S]*state\.hydrating = false[\s\S]*queuedSocketEvents\.splice\(0\).*handleSocketEvent/);
 });
 
-test('generation fallback polling is bounded and always unwedge the form on exhaustion', () => {
+test('production generation polling allows slow completion within a bounded wait budget', () => {
+  const app = read('pwa/app.js');
+  const config = readGenerationPollConfig(app);
+  const intervals = [config.initialDelay, ...config.retryDelays];
+  const totalWait = intervals.reduce((total, delay) => total + delay, 0);
+  const socketCompletion = app.slice(app.indexOf("if (event.type === 'complete')"), app.indexOf("if (event.type === 'failed')"));
+
+  assert.ok(totalWait >= 90_000, `expected at least 90 seconds, received ${totalWait}ms`);
+  assert.ok(totalWait <= 150_000, `expected at most 150 seconds, received ${totalWait}ms`);
+  assert.ok(intervals.every(delay => delay > 0 && delay <= 30_000));
+  assert.match(app, /new PollController\(\{[\s\S]*retryDelays:\s*GENERATION_POLL_CONFIG\.retryDelays/);
+  assert.match(app, /generationPoller\.start\(GENERATION_POLL_CONFIG\.initialDelay\)/);
+  assert.match(socketCompletion, /generationPoller\.cancel\(\)/);
+});
+
+test('generation fallback polling always unwedges the form on bounded exhaustion', () => {
   const app = read('pwa/app.js');
 
-  assert.match(app, /new PollController\(\{[\s\S]*retryDelays:\s*\[[^\]]+\]/);
-  assert.match(app, /generationPoller\.start\(1800\)/);
   assert.match(app, /onExhausted\([^)]*\)\s*\{[\s\S]*state\.generating = false[\s\S]*elements\.send\.disabled = false[\s\S]*elements\.progress\.hidden = true[\s\S]*showToast\(/);
   assert.doesNotMatch(app, /pollTimer\s*=\s*setTimeout\(refreshCards/);
 });
