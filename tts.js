@@ -411,8 +411,8 @@ function createVolcengineAbortContext(options = {}) {
     process.env.VOLCENGINE_TTS_TIMEOUT_MS || VOLCENGINE_DEFAULT_TIMEOUT_MS
   );
   const timeoutMs = Number(configured);
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
-    throw new Error('Volcengine TTS timeout must be a non-negative number');
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('Volcengine TTS timeout must be a positive number');
   }
 
   const controller = new AbortController();
@@ -424,12 +424,10 @@ function createVolcengineAbortContext(options = {}) {
     else externalSignal.addEventListener('abort', forwardAbort, { once: true });
   }
 
-  const timer = timeoutMs > 0
-    ? setTimeout(() => {
-      timedOut = true;
-      controller.abort(new Error(`Volcengine TTS timed out after ${timeoutMs}ms`));
-    }, timeoutMs)
-    : null;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`Volcengine TTS timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
 
   let abortListener;
   const aborted = new Promise((_, reject) => {
@@ -454,7 +452,7 @@ function createVolcengineAbortContext(options = {}) {
     },
     timeoutMs,
     cleanup() {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       if (externalSignal && !externalSignal.aborted) {
         externalSignal.removeEventListener('abort', forwardAbort);
       }

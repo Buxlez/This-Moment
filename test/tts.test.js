@@ -598,6 +598,87 @@ test('request timeout clears in-flight state so the same cache key can retry', a
   }));
 });
 
+test('invalid explicit timeout options reject before fetch', async t => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const invalidTimeouts = [0, -1, 'not-a-number'];
+
+    for (const timeoutMs of invalidTimeouts) {
+      await t.test(String(timeoutMs), async () => {
+        let fetchCalled = false;
+        const fetchImpl = async () => {
+          fetchCalled = true;
+          return streamingResponse([audioEvent(VALID_MP3), completionEvent()]);
+        };
+
+        await assert.rejects(
+          synthesize(`invalid-option-timeout-${timeoutMs}`, {
+            ...volcengineOptions(cacheDir, fetchImpl),
+            timeoutMs,
+          }),
+          /timeout.*positive number/i
+        );
+        assert.equal(fetchCalled, false);
+      });
+    }
+  }));
+});
+
+test('invalid timeout environment values reject before fetch', async t => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const invalidTimeouts = ['0', '-1', 'not-a-number'];
+
+    for (const timeoutMs of invalidTimeouts) {
+      await t.test(timeoutMs, async () => {
+        process.env.VOLCENGINE_TTS_TIMEOUT_MS = timeoutMs;
+        let fetchCalled = false;
+        const fetchImpl = async () => {
+          fetchCalled = true;
+          return streamingResponse([audioEvent(VALID_MP3), completionEvent()]);
+        };
+
+        try {
+          await assert.rejects(
+            synthesize(`invalid-env-timeout-${timeoutMs}`, {
+              ...volcengineOptions(cacheDir, fetchImpl),
+            }),
+            /timeout.*positive number/i
+          );
+          assert.equal(fetchCalled, false);
+        } finally {
+          delete process.env.VOLCENGINE_TTS_TIMEOUT_MS;
+        }
+      });
+    }
+  }));
+});
+
+test('uses the 30000ms default timeout and accepts a positive override', async () => {
+  await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
+    const observedDelays = [];
+    const nativeSetTimeout = global.setTimeout;
+    global.setTimeout = (callback, delay, ...args) => {
+      observedDelays.push(delay);
+      return nativeSetTimeout(callback, delay, ...args);
+    };
+    const fetchImpl = async () => streamingResponse([
+      audioEvent(VALID_MP3),
+      completionEvent(),
+    ]);
+
+    try {
+      await synthesize('default timeout', volcengineOptions(cacheDir, fetchImpl));
+      await synthesize('positive timeout', {
+        ...volcengineOptions(cacheDir, fetchImpl),
+        timeoutMs: 25,
+      });
+    } finally {
+      global.setTimeout = nativeSetTimeout;
+    }
+
+    assert.deepEqual(observedDelays, [30000, 25]);
+  }));
+});
+
 test('oversized JSON frame fails at the configured limit without publishing files', async () => {
   await withoutVolcengineEnv(() => withTemporaryCache(async cacheDir => {
     const oversizedFrame = `{"code":0,"message":"${'x'.repeat(100)}`;
