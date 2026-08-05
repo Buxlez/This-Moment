@@ -1,4 +1,5 @@
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -108,7 +109,10 @@ function getNeteaseConfig() {
 
 function isLoopbackHostname(hostname) {
   const normalized = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  return normalized === 'localhost' || normalized === '::1' || normalized.startsWith('127.');
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion === 4) return normalized.split('.', 1)[0] === '127';
+  if (ipVersion === 6) return normalized === '::1';
+  return normalized === 'localhost';
 }
 
 function canSendRemoteCookie(url, options) {
