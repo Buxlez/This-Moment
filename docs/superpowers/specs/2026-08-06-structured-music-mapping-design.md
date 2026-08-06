@@ -455,6 +455,7 @@ Prompt 不再只注入上一张卡片的方向和歌曲，而是注入：
 
 | 代码 | 含义 |
 | --- | --- |
+| `style_mismatch` | 候选风格簇与本轮明确风格簇冲突 |
 | `genre_mismatch` | 模型声明与明确曲风冲突 |
 | `vocal_mismatch` | 人声条件冲突 |
 | `language_mismatch` | 语言条件冲突 |
@@ -465,6 +466,7 @@ Prompt 不再只注入上一张卡片的方向和歌曲，而是注入：
 | `duplicate` | 本卡片重复平台 ID |
 | `recently_used` | 命中近期排除 ID |
 | `unavailable` | 无可用播放地址 |
+| `limit_reached` | 并发校验完成时卡片已达到目标数量 |
 | `accepted` | 成功进入合格集合 |
 
 审计不得保存：
@@ -535,6 +537,7 @@ Prompt 不再只注入上一张卡片的方向和歌曲，而是注入：
 - Candidate Schema 拒绝无效枚举和额外字段；
 - 模型输出试图重写意图、约束或字段来源时被严格 Schema 拒绝；
 - 模型输出中普通流行候选声明不得通过明确 R&B 约束；
+- 传统地下说唱候选声明不得通过明确的 `cn_internet_underground` 风格簇约束；
 - 两次 Schema 失败后整轮失败，不保存卡片。
 
 ### 12.5 网易云实体匹配
