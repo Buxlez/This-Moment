@@ -50,28 +50,32 @@ function createDemoLlm() {
   };
 }
 
-function createLiveLlm() {
-  if (!process.env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY not set');
-  const client = new OpenAI({
-    apiKey: process.env.DEEPSEEK_API_KEY,
-    baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+function createLiveLlm({ OpenAIClient = OpenAI, env = process.env } = {}) {
+  if (!env.DEEPSEEK_API_KEY) throw new Error('DEEPSEEK_API_KEY not set');
+  const client = new OpenAIClient({
+    apiKey: env.DEEPSEEK_API_KEY,
+    baseURL: env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+    timeout: 45_000,
+    maxRetries: 0,
   });
   return {
     async generatePlan(input) {
       const prompt = buildRecommendationContext(input);
       let lastError;
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        const completion = await client.chat.completions.create({
+          model: env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+          messages: [
+            { role: 'system', content: '你是 this moment 的音乐方向编辑。只输出严格 JSON，不要 Markdown。' },
+            { role: 'user', content: attempt ? `${prompt}\n\n上次输出不符合 Schema，请修复后只输出 JSON。` : prompt },
+          ],
+          thinking: { type: 'disabled' },
+          max_tokens: 4000,
+          response_format: { type: 'json_object' },
+          stream: false,
+        });
+        const raw = completion.choices?.[0]?.message?.content || '';
         try {
-          const completion = await client.chat.completions.create({
-            model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
-            messages: [
-              { role: 'system', content: '你是 this moment 的音乐方向编辑。只输出严格 JSON，不要 Markdown。' },
-              { role: 'user', content: attempt ? `${prompt}\n\n上次输出不符合 Schema，请修复后只输出 JSON。` : prompt },
-            ],
-            response_format: { type: 'json_object' },
-            stream: false,
-          });
-          const raw = completion.choices?.[0]?.message?.content || '';
           return RecommendationPlanSchema.parse(JSON.parse(raw));
         } catch (error) { lastError = error; }
       }
