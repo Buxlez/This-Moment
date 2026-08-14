@@ -252,6 +252,33 @@ test('netease request scheduler keeps a minimum start interval', async () => {
   assert.deepEqual(waits, [350]);
 });
 
+test('netease request scheduler does not wait for an earlier request to finish', async () => {
+  let clock = 0;
+  const starts = [];
+  let releaseFirst;
+  const firstFinished = new Promise(resolve => { releaseFirst = resolve; });
+  const schedule = netease.createRequestScheduler({
+    minIntervalMs: 350,
+    now: () => clock,
+    sleep: async milliseconds => { clock += milliseconds; },
+  });
+
+  const first = schedule(async () => {
+    starts.push(clock);
+    await firstFinished;
+    return 'first';
+  });
+  const second = schedule(async () => {
+    starts.push(clock);
+    return 'second';
+  });
+
+  assert.equal(await second, 'second');
+  assert.deepEqual(starts, [0, 350]);
+  releaseFirst();
+  assert.equal(await first, 'first');
+});
+
 test('candidate validation stops taking work after reaching the target', async () => {
   let searches = 0;
   const candidates = Array.from({ length: 12 }, (_, index) => ({ title: `Song ${index}`, artist: `Artist ${index}` }));

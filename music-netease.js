@@ -20,19 +20,17 @@ function createRequestScheduler({
   sleep: wait = sleep,
 } = {}) {
   let lastStartedAt = null;
-  let tail = Promise.resolve();
+  let startTail = Promise.resolve();
   return function schedule(operation) {
-    const run = async () => {
+    const start = startTail.then(async () => {
       if (lastStartedAt !== null) {
         const remaining = Math.max(0, lastStartedAt + minIntervalMs - now());
         if (remaining) await wait(remaining);
       }
       lastStartedAt = now();
-      return operation();
-    };
-    const result = tail.then(run, run);
-    tail = result.catch(() => {});
-    return result;
+    });
+    startTail = start.catch(() => {});
+    return start.then(operation);
   };
 }
 
