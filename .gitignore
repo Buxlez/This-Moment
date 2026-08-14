@@ -11,6 +11,7 @@ Kokoro-FastAPI/
 
 # Local agent/development memory
 .agents/
+.worktrees/
 AGENTS.md
 MEMORY.md
 memory/
