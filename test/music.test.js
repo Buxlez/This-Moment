@@ -83,11 +83,11 @@ test('netease search can defer artwork enrichment until playability is confirmed
   assert.equal(track.coverUrl, null);
 });
 
-test('candidate validation enriches only tracks confirmed playable', async () => {
+test('candidate validation returns compact results without fetching details', async () => {
   const enriched = [];
   const provider = {
     name: 'netease',
-    async searchTrack(title, artist) { return { id: title, title, artist }; },
+    async searchTrack(title, artist) { return { id: title, title, artist, album: '搜索专辑' }; },
     async checkPlayable(id) { return id === '可播'; },
     async enrichTrack(track) { enriched.push(track.id); return { ...track, coverUrl: 'https://example.test/cover.jpg' }; },
   };
@@ -97,8 +97,9 @@ test('candidate validation enriches only tracks confirmed playable', async () =>
     { title: '可播', artist: '乙' },
   ], provider, { concurrency: 1 });
 
-  assert.deepEqual(enriched, ['可播']);
-  assert.equal(tracks[0].coverUrl, 'https://example.test/cover.jpg');
+  assert.deepEqual(enriched, []);
+  assert.equal(tracks[0].album, '搜索专辑');
+  assert.equal(tracks[0].coverUrl, undefined);
 });
 
 test('netease retries a rate-limited search with backoff', async () => {

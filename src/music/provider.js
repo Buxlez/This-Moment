@@ -39,12 +39,9 @@ async function validateCandidates(candidates, provider, options = {}) {
       if (!resolved || !matchTrack(candidate, resolved) || excluded.has(id) || seen.has(id)) continue;
       const playable = await provider.checkPlayable(resolved.id);
       if (!playable || seen.has(id)) continue;
-      const enriched = typeof provider.enrichTrack === 'function'
-        ? await provider.enrichTrack(resolved)
-        : resolved;
       if (seen.has(id)) continue;
       seen.add(id);
-      accepted.push({ index, track: { ...(enriched || resolved), provider: provider.name } });
+      accepted.push({ index, track: { ...resolved, provider: provider.name } });
     }
   }
 
@@ -79,7 +76,6 @@ function createNeteaseProvider() {
     name: 'netease',
     async searchTrack(title, artist) { return netease.searchSong(`${title} ${artist}`, { enrich: false }); },
     async checkPlayable(id) { return netease.isSongPlayable(id); },
-    async enrichTrack(track) { return (await netease.getSongDetail(track.id)) || track; },
     async resolvePlaybackUrl(id) { return netease.getPlaybackUrl(id); },
   };
 }
