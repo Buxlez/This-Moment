@@ -15,7 +15,7 @@ function createRecommendationPipeline(dependencies) {
     throw new Error('A TTS artifact validator is required.');
   }
   const targetTrackCount = Math.max(1, Math.min(Number(dependencies.targetTrackCount || 8), 20));
-  const candidateTrackCount = Math.min(targetTrackCount * 4, 40);
+  const candidateTrackCount = Math.min(targetTrackCount * 2, 16);
   const pauseForProgress = () => progressDelayMs ? new Promise(resolve => setTimeout(resolve, progressDelayMs)) : Promise.resolve();
 
   async function generate({ sessionId, userInput, environment = {} }) {

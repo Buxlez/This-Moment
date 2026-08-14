@@ -86,7 +86,7 @@ test('passes the trusted cache root to TTS synthesis', async () => {
 test('emits documented stage order and persists the default 8-track card', async () => {
   const { pipeline, events, calls, saved, maxActiveSearches } = harness();
   const card = await pipeline.generate({ sessionId: 's1', userInput: '提神但别太吵', environment: { city: '上海', weather: '晴朗' } });
-  assert.equal(calls[0].candidateCount, 32);
+  assert.equal(calls[0].candidateCount, 16);
   assert.equal(calls.length, 1);
   assert.equal(card.tracks.length, 8);
   assert.equal(maxActiveSearches(), 2);
