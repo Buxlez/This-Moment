@@ -123,6 +123,10 @@ describe("MockExperiencePage", () => {
     render(<App gateway={new MockRecommendationGateway(0)} />);
 
     expect(await screen.findByText("给回家路上的柔和夜色")).toBeInTheDocument();
+    expect(screen.getAllByRole("main")).toHaveLength(1);
+    expect(
+      screen.getByText("给回家路上的柔和夜色").closest("[data-astryx-theme]"),
+    ).toHaveAttribute("data-astryx-theme", "neutral");
 
     const composer = screen.getByLabelText("音乐需求");
     await user.type(composer, "夜里开车，想听安静但不困的歌{Enter}");
@@ -137,6 +141,27 @@ describe("MockExperiencePage", () => {
     expect(
       screen.getByRole("region", {name: "歌曲播放器"}),
     ).toBeInTheDocument();
+  });
+
+  it("keeps default bootstrap content singular through StrictMode rerenders", async () => {
+    vi.useFakeTimers();
+    const {rerender} = render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    rerender(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(450);
+    });
+
+    expect(screen.getAllByText("给回家路上的柔和夜色")).toHaveLength(1);
   });
 
   it("blocks submission until bootstrap settles", async () => {

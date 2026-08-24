@@ -2,7 +2,7 @@ import {StrictMode} from "react";
 import {createRoot} from "react-dom/client";
 import "@astryxdesign/core/reset.css";
 import "@astryxdesign/core/astryx.css";
-// @ts-ignore The package exports this stylesheet without its declared type file.
+// @ts-expect-error Astryx 0.4.7 exports a missing theme.css.d.ts declaration.
 import "@astryxdesign/theme-neutral/theme.css";
 import {App} from "./app/App";
 
