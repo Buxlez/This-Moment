@@ -5,9 +5,9 @@ import type {
 } from "../domain/models";
 
 export const demoTracks: Track[] = [
-  { id: "track-night-cruising", title: "Night Cruising", artist: "Fishmans", durationMs: 361000 },
-  { id: "track-midnight-pretenders", title: "Midnight Pretenders", artist: "Tomoko Aran", durationMs: 342000 },
-  { id: "track-aruarian-dance", title: "Aruarian Dance", artist: "Nujabes", durationMs: 250000 },
+  { id: "track-1", title: "Night Cruising", artist: "Fishmans", durationMs: 361000 },
+  { id: "track-2", title: "Midnight Pretenders", artist: "Tomoko Aran", durationMs: 342000 },
+  { id: "track-3", title: "Aruarian Dance", artist: "Nujabes", durationMs: 250000 },
 ];
 
 export const demoCard: RecommendationCard = {
@@ -20,7 +20,7 @@ export const demoCard: RecommendationCard = {
   tracks: demoTracks,
 };
 
-export const demoBootstrapData: BootstrapData = {
+export const bootstrapFixture: BootstrapData = {
   service: { status: "connected", label: "Mock 已连接" },
   environment: {
     city: "上海",

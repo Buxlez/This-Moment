@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MockRecommendationGateway } from "../src/gateways/MockRecommendationGateway";
+import { bootstrapFixture, demoTracks } from "../src/gateways/fixtures";
 
 describe("MockRecommendationGateway", () => {
   it("bootstraps a connected Shanghai environment with one card", async () => {
@@ -8,6 +9,7 @@ describe("MockRecommendationGateway", () => {
     expect(result.service.status).toBe("connected");
     expect(result.environment.city).toBe("上海");
     expect(result.cards).toHaveLength(1);
+    expect(result).toEqual(bootstrapFixture);
   });
 
   it("generates three tracks and ready narration for a prompt", async () => {
@@ -16,6 +18,8 @@ describe("MockRecommendationGateway", () => {
 
     expect(result.prompt).toBe(prompt);
     expect(result.tracks).toHaveLength(3);
+    expect(result.tracks.map(({ id }) => id)).toEqual(["track-1", "track-2", "track-3"]);
+    expect(demoTracks.map(({ id }) => id)).toEqual(["track-1", "track-2", "track-3"]);
     expect(result.ttsStatus).toBe("ready");
   });
 

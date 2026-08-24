@@ -1,16 +1,13 @@
 import type { BootstrapData, RecommendationCard } from "../domain/models";
-import type {
-  NarrationRetryResult,
-  RecommendationGateway,
-} from "./RecommendationGateway";
-import { demoBootstrapData, demoCard } from "./fixtures";
+import type { RecommendationGateway } from "./RecommendationGateway";
+import { bootstrapFixture, demoCard } from "./fixtures";
 
 export class MockRecommendationGateway implements RecommendationGateway {
   constructor(private readonly delayMs = 450) {}
 
   async bootstrap(): Promise<BootstrapData> {
     await this.wait();
-    return this.clone(demoBootstrapData);
+    return this.clone(bootstrapFixture);
   }
 
   async generate(prompt: string): Promise<RecommendationCard> {
@@ -24,7 +21,7 @@ export class MockRecommendationGateway implements RecommendationGateway {
     });
   }
 
-  async retryNarration(cardId: string): Promise<NarrationRetryResult> {
+  async retryNarration(cardId: string): Promise<{ cardId: string; status: "ready" }> {
     await this.wait();
     return { cardId, status: "ready" };
   }
