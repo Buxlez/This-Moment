@@ -23,6 +23,8 @@ const composerPlaceholder = "说说此刻的场景、心情，或你想听的音
 
 export function MockExperiencePage({gateway}: MockExperiencePageProps) {
   const experience = useMockExperience(gateway);
+  const isComposerDisabled =
+    experience.isBootstrapping || experience.session.isGenerating;
 
   const composer = (
     <VStack gap={0}>
@@ -36,7 +38,7 @@ export function MockExperiencePage({gateway}: MockExperiencePageProps) {
         density="spacious"
         input={
           <ChatComposerInput
-            isDisabled={experience.session.isGenerating}
+            isDisabled={isComposerDisabled}
             label="音乐需求"
             onChange={experience.setComposerValue}
             onSubmit={experience.submit}
@@ -44,7 +46,7 @@ export function MockExperiencePage({gateway}: MockExperiencePageProps) {
             value={experience.composerValue}
           />
         }
-        isDisabled={experience.session.isGenerating}
+        isDisabled={isComposerDisabled}
         onChange={experience.setComposerValue}
         onSubmit={experience.submit}
         placeholder={composerPlaceholder}
