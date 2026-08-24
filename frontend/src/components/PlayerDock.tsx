@@ -25,6 +25,7 @@ export function PlayerDock({state, dispatch}: PlayerDockProps) {
       aria-label="歌曲播放器"
       dividers={["top"]}
       padding={3}
+      role="region"
       variant="section">
       <HStack align="center" gap={3} justify="between" wrap="wrap">
         <HStack align="center" gap={2}>

@@ -12,7 +12,9 @@ describe("PlayerDock", () => {
     const {rerender} = render(
       <PlayerDock state={initialPlayerState} dispatch={dispatch} />,
     );
-    expect(screen.queryByLabelText("歌曲播放器")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", {name: "歌曲播放器"}),
+    ).not.toBeInTheDocument();
 
     rerender(
       <PlayerDock
@@ -26,7 +28,7 @@ describe("PlayerDock", () => {
       />,
     );
 
-    expect(screen.getByLabelText("歌曲播放器")).toBeInTheDocument();
+    expect(screen.getByRole("region", {name: "歌曲播放器"})).toBeInTheDocument();
     expect(screen.getByRole("button", {name: "暂停"})).toBeInTheDocument();
     expect(screen.getByRole("slider", {name: "播放进度"})).toBeInTheDocument();
 

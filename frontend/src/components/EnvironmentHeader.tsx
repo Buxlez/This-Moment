@@ -1,4 +1,4 @@
-import {useState} from "react";
+import {useId, useState} from "react";
 import {Button} from "@astryxdesign/core/Button";
 import {Heading} from "@astryxdesign/core/Heading";
 import {HStack} from "@astryxdesign/core/HStack";
@@ -24,6 +24,7 @@ export function EnvironmentHeader({
   environment,
   onEnvironmentChange,
 }: EnvironmentHeaderProps) {
+  const editorId = useId();
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const statusVariant =
     service.status === "connected"
@@ -54,6 +55,8 @@ export function EnvironmentHeader({
               {environment.city} · {environment.weather} · {environment.temperatureC}°
             </Text>
             <Button
+              aria-controls={editorId}
+              aria-expanded={isEditorOpen}
               label="调整环境"
               onClick={() => setIsEditorOpen((isOpen) => !isOpen)}
               variant="ghost"
@@ -62,7 +65,7 @@ export function EnvironmentHeader({
         </HStack>
 
         {isEditorOpen ? (
-          <Section padding={4} variant="muted">
+          <Section id={editorId} padding={4} variant="muted">
             <HStack align="end" gap={3} wrap="wrap">
               <TextInput
                 label="城市"
