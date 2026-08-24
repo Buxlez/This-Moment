@@ -117,6 +117,16 @@ afterEach(() => {
 });
 
 describe("MockExperiencePage", () => {
+  it("localizes Astryx chat controls to Chinese", async () => {
+    render(<App gateway={new MockRecommendationGateway(0)} />);
+
+    expect(await screen.findByText("给回家路上的柔和夜色")).toBeInTheDocument();
+    expect(screen.getByRole("button", {name: "发送"})).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", {name: "滚动到底部"}),
+    ).toBeInTheDocument();
+  });
+
   it("bootstraps recommendations, generates a new set, and starts a selected song", async () => {
     const user = userEvent.setup();
 
@@ -216,6 +226,22 @@ describe("MockExperiencePage", () => {
       await second.generations[0].promise;
     });
     expect(screen.getByText("当前生成结果")).toBeInTheDocument();
+  });
+
+  it("resets the player when the gateway changes", async () => {
+    const first = new DeferredGateway();
+    const second = new DeferredGateway();
+    const {rerender} = render(<MockExperiencePage gateway={first} />);
+
+    await resolveBootstrap(first);
+    fireEvent.click(screen.getByRole("button", {name: "播放 Night Cruising"}));
+    expect(screen.getByRole("region", {name: "歌曲播放器"})).toBeInTheDocument();
+
+    rerender(<MockExperiencePage gateway={second} />);
+
+    expect(
+      screen.queryByRole("region", {name: "歌曲播放器"}),
+    ).not.toBeInTheDocument();
   });
 
   it("ignores a late bootstrap from a replaced gateway", async () => {

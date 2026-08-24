@@ -2,6 +2,8 @@ import {Button} from "@astryxdesign/core/Button";
 import {ChatMessage, ChatMessageBubble} from "@astryxdesign/core/Chat";
 import {Heading} from "@astryxdesign/core/Heading";
 import {HStack} from "@astryxdesign/core/HStack";
+import {Icon} from "@astryxdesign/core/Icon";
+import {IconButton} from "@astryxdesign/core/IconButton";
 import {List, ListItem} from "@astryxdesign/core/List";
 import {Section} from "@astryxdesign/core/Section";
 import {
@@ -107,21 +109,29 @@ export function RecommendationMessage({
               {card.tracks.map((track) => (
                 <ListItem
                   key={track.id}
-                  description={track.artist}
-                  endContent={
-                    <HStack align="center" gap={2}>
-                      <Text hasTabularNumbers type="supporting">
-                        {formatDuration(track.durationMs)}
-                      </Text>
-                      <Button
-                        label={`播放 ${track.title}`}
-                        onClick={() => onPlayTrack(track, card.tracks)}
-                        size="sm"
-                        variant="ghost"
-                      />
-                    </HStack>
+                  label={
+                    <VStack
+                      aria-label={`${track.title} 曲目信息`}
+                      as="span"
+                      gap={1}
+                      role="group">
+                      <Text weight="semibold">{track.title}</Text>
+                      <Text type="supporting">{track.artist}</Text>
+                      <HStack align="center" as="span" gap={1}>
+                        <Text hasTabularNumbers type="supporting">
+                          {formatDuration(track.durationMs)}
+                        </Text>
+                        <IconButton
+                          icon={<Icon icon="chevronRight" size="sm" />}
+                          label={`播放 ${track.title}`}
+                          onClick={() => onPlayTrack(track, card.tracks)}
+                          size="sm"
+                          tooltip={`播放 ${track.title}`}
+                          variant="ghost"
+                        />
+                      </HStack>
+                    </VStack>
                   }
-                  label={track.title}
                   startContent={
                     <Thumbnail
                       alt={`${track.title} 封面`}

@@ -10,6 +10,7 @@ export interface PlayerState {
 }
 
 export type PlayerAction =
+  | { type: "reset" }
   | { type: "select"; track: Track; queue: Track[] }
   | { type: "toggle" }
   | { type: "next" }
@@ -37,6 +38,8 @@ function normalizePercent(value: number): number | null {
 
 export function playerReducer(state: PlayerState, action: PlayerAction): PlayerState {
   switch (action.type) {
+    case "reset":
+      return initialPlayerState;
     case "select":
       return {
         ...state,

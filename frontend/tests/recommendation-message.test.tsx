@@ -28,6 +28,32 @@ describe("RecommendationMessage", () => {
     expect(onNarrationAction).toHaveBeenCalledWith(demoCard.id);
   });
 
+  it("keeps each compact play action inside the track information group", () => {
+    render(
+      <RecommendationMessage
+        card={demoCard}
+        onPlayTrack={vi.fn()}
+        onNarrationAction={vi.fn()}
+      />,
+    );
+
+    const rows = screen.getAllByRole("listitem");
+    for (const [index, track] of demoCard.tracks.entries()) {
+      const row = rows[index];
+      const trackInformation = within(row).getByRole("group", {
+        name: `${track.title} 曲目信息`,
+      });
+
+      expect(within(trackInformation).getByText(track.title)).toBeVisible();
+      expect(within(trackInformation).getByText(track.artist)).toBeVisible();
+      expect(
+        within(trackInformation).getByRole("button", {
+          name: `播放 ${track.title}`,
+        }),
+      ).toBeInTheDocument();
+    }
+  });
+
   it.each<{
     status: TtsStatus;
     statusLabel: string;

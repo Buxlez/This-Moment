@@ -69,6 +69,17 @@ describe("playerReducer", () => {
     expect(adjusted).toMatchObject({ volume: 35, isMuted: false });
   });
 
+  it("resets every player field to its initial state", () => {
+    const selected = playerReducer(initialPlayerState, {
+      type: "select",
+      track: demoTracks[0],
+      queue: demoTracks,
+    });
+    const changed = playerReducer(selected, {type: "progress", value: 42});
+
+    expect(playerReducer(changed, {type: "reset"})).toEqual(initialPlayerState);
+  });
+
   it("clamps progress and volume percentages to the valid range", () => {
     const progressed = playerReducer(initialPlayerState, { type: "progress", value: -10 });
     const progressMax = playerReducer(initialPlayerState, { type: "progress", value: 120 });

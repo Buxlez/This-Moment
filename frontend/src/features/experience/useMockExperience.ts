@@ -129,6 +129,8 @@ export function useMockExperience(gateway: RecommendationGateway) {
     setEnvironment(initialEnvironment);
     setComposerValue("");
     sessionDispatch({type: "gateway-reset"});
+    playerStateRef.current = initialPlayerState;
+    rawPlayerDispatch({type: "reset"});
 
     const ownsBootstrap = () =>
       isCurrent && isMountedRef.current && epochRef.current === epoch;

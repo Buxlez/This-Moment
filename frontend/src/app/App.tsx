@@ -1,3 +1,5 @@
+import {InternationalizationProvider} from "@astryxdesign/core/i18n";
+import zhCN from "@astryxdesign/core/locales/zh-CN.json";
 import {Theme} from "@astryxdesign/core/theme";
 import {neutralTheme} from "@astryxdesign/theme-neutral/built";
 import {MockExperiencePage} from "../components/MockExperiencePage";
@@ -12,8 +14,10 @@ const defaultGateway = new MockRecommendationGateway();
 
 export function App({gateway = defaultGateway}: AppProps) {
   return (
-    <Theme theme={neutralTheme} mode="system">
-      <MockExperiencePage gateway={gateway} />
-    </Theme>
+    <InternationalizationProvider locale="zh-CN" messages={{"zh-CN": zhCN}}>
+      <Theme theme={neutralTheme} mode="system">
+        <MockExperiencePage gateway={gateway} />
+      </Theme>
+    </InternationalizationProvider>
   );
 }
