@@ -8,8 +8,8 @@ class ResizeObserverMock {
 
 class IntersectionObserverMock {
   readonly root = null;
-  readonly rootMargin = "";
-  readonly thresholds: number[] = [];
+  readonly rootMargin = "0px";
+  readonly thresholds = [0];
 
   observe() {}
   unobserve() {}
@@ -19,17 +19,20 @@ class IntersectionObserverMock {
   }
 }
 
-Object.defineProperty(window, "ResizeObserver", {
-  writable: true,
-  value: ResizeObserverMock,
-});
-
-Object.defineProperty(window, "IntersectionObserver", {
+Object.defineProperty(globalThis, "IntersectionObserver", {
+  configurable: true,
   writable: true,
   value: IntersectionObserverMock,
 });
 
-Object.defineProperty(window, "matchMedia", {
+Object.defineProperty(globalThis, "ResizeObserver", {
+  configurable: true,
+  writable: true,
+  value: ResizeObserverMock,
+});
+
+Object.defineProperty(globalThis, "matchMedia", {
+  configurable: true,
   writable: true,
   value: (query: string): MediaQueryList => ({
     matches: false,
