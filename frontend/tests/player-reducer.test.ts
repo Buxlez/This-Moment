@@ -72,10 +72,22 @@ describe("playerReducer", () => {
   it("resets every player field to its initial state", () => {
     const selected = playerReducer(initialPlayerState, {
       type: "select",
-      track: demoTracks[0],
+      track: demoTracks[1],
       queue: demoTracks,
     });
-    const changed = playerReducer(selected, {type: "progress", value: 42});
+    const progressed = playerReducer(selected, {type: "progress", value: 42});
+    const muted = playerReducer(progressed, {type: "mute"});
+    const volumeChanged = playerReducer(muted, {type: "volume", value: 35});
+    const changed = playerReducer(volumeChanged, {type: "mute"});
+
+    expect(changed).toMatchObject({
+      currentTrack: demoTracks[1],
+      queue: demoTracks,
+      isPlaying: true,
+      progress: 42,
+      volume: 35,
+      isMuted: true,
+    });
 
     expect(playerReducer(changed, {type: "reset"})).toEqual(initialPlayerState);
   });
