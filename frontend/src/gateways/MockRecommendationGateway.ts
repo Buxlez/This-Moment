@@ -14,7 +14,7 @@ export class MockRecommendationGateway implements RecommendationGateway {
     await this.wait();
     return this.clone({
       ...demoCard,
-      id: `card-${Date.now()}`,
+      id: `card-${crypto.randomUUID()}`,
       prompt,
       headline: "为此刻重新排好的一组歌",
       createdAt: new Date().toISOString(),
