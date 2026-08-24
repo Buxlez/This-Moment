@@ -2,6 +2,7 @@ import {StrictMode} from "react";
 import {act, cleanup, fireEvent, render, screen} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {afterEach, describe, expect, it, vi} from "vitest";
+import {App} from "../src/app/App";
 import {MockExperiencePage} from "../src/components/MockExperiencePage";
 import type {
   BootstrapData,
@@ -119,7 +120,7 @@ describe("MockExperiencePage", () => {
   it("bootstraps recommendations, generates a new set, and starts a selected song", async () => {
     const user = userEvent.setup();
 
-    render(<MockExperiencePage gateway={new MockRecommendationGateway(0)} />);
+    render(<App gateway={new MockRecommendationGateway(0)} />);
 
     expect(await screen.findByText("给回家路上的柔和夜色")).toBeInTheDocument();
 
