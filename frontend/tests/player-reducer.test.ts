@@ -69,6 +69,43 @@ describe("playerReducer", () => {
     expect(adjusted).toMatchObject({ volume: 35, isMuted: false });
   });
 
+  it("clamps progress and volume percentages to the valid range", () => {
+    const progressed = playerReducer(initialPlayerState, { type: "progress", value: -10 });
+    const progressMax = playerReducer(initialPlayerState, { type: "progress", value: 120 });
+    const volumeMin = playerReducer(initialPlayerState, { type: "volume", value: -10 });
+    const volumeMax = playerReducer(initialPlayerState, { type: "volume", value: 120 });
+
+    expect(progressed.progress).toBe(0);
+    expect(progressMax.progress).toBe(100);
+    expect(volumeMin.volume).toBe(0);
+    expect(volumeMax.volume).toBe(100);
+  });
+
+  it("preserves state identity for non-finite progress and volume values", () => {
+    const mutedState = { ...initialPlayerState, isMuted: true };
+
+    expect(playerReducer(initialPlayerState, { type: "progress", value: Number.NaN })).toBe(
+      initialPlayerState,
+    );
+    expect(playerReducer(mutedState, { type: "volume", value: Number.POSITIVE_INFINITY })).toBe(
+      mutedState,
+    );
+  });
+
+  it("copies the queue so source-array mutations do not alter player state", () => {
+    const sourceQueue = [...demoTracks];
+    const result = playerReducer(initialPlayerState, {
+      type: "select",
+      track: sourceQueue[1],
+      queue: sourceQueue,
+    });
+
+    sourceQueue.pop();
+
+    expect(result.queue).toHaveLength(3);
+    expect(result.queue).not.toBe(sourceQueue);
+  });
+
   it("preserves state identity when navigation cannot find a current track", () => {
     const state = {
       ...initialPlayerState,

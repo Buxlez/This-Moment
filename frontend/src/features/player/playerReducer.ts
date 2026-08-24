@@ -27,22 +27,34 @@ export const initialPlayerState: PlayerState = {
   isMuted: false,
 };
 
+function normalizePercent(value: number): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+
+  return Math.min(100, Math.max(0, value));
+}
+
 export function playerReducer(state: PlayerState, action: PlayerAction): PlayerState {
   switch (action.type) {
     case "select":
       return {
         ...state,
         currentTrack: action.track,
-        queue: action.queue,
+        queue: [...action.queue],
         isPlaying: true,
         progress: 0,
       };
     case "toggle":
       return { ...state, isPlaying: !state.isPlaying };
-    case "progress":
-      return { ...state, progress: action.value };
-    case "volume":
-      return { ...state, volume: action.value, isMuted: false };
+    case "progress": {
+      const progress = normalizePercent(action.value);
+      return progress === null ? state : { ...state, progress };
+    }
+    case "volume": {
+      const volume = normalizePercent(action.value);
+      return volume === null ? state : { ...state, volume, isMuted: false };
+    }
     case "mute":
       return { ...state, isMuted: !state.isMuted };
     case "next":
