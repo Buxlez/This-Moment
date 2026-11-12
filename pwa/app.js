@@ -12,9 +12,10 @@
   const $ = selector => document.querySelector(selector);
   const elements = {
     form: $('#recommendationForm'), input: $('#momentInput'), send: $('#sendButton'),
-    city: $('#cityInput'), weather: $('#weatherInput'), time: $('#timeInput'), presets: $('#presetList'),
-    briefCity: $('#briefCity'), briefWeather: $('#briefWeather'), briefTemperature: $('#briefTemperature'), briefTime: $('#briefTime'), environmentBrief: $('#environmentBrief'),
-    environmentSource: $('#environmentSource'), temperature: $('#temperatureValue'), apparentTemperature: $('#apparentTemperatureValue'),
+    feed: $('#conversationFeed'), sceneCanvas: $('#sceneCanvas'), sceneEnv: $('#sceneEnv'),
+    scenePanel: $('#scenePanel'), sceneBackdrop: $('#sceneBackdrop'), sceneGrid: $('#sceneGrid'),
+    sceneButton: $('#sceneButton'), randomScene: $('#randomSceneButton'), immersive: $('#immersiveButton'), scrollTop: $('#scrollTopButton'),
+    realWeather: $('#realWeatherButton'), environmentSource: $('#environmentSource'),
     mode: $('#modePill'), progress: $('#progressPanel'), progressTitle: $('#progressTitle'), progressNumber: $('#progressNumber'), progressBar: $('#progressBar'),
     pendingMessage: $('#pendingUserMessage'), pendingMeta: $('#pendingMessageMeta'),
     cards: $('#cards'), empty: $('#emptyState'), toast: $('#toast'),
@@ -30,7 +31,13 @@
     cards: new Map(), presets: [], generating: false, socket: null, toastTimer: null,
     pendingEnvironment: null, automaticEnvironment: null, hydrating: true, queuedSocketEvents: [],
     historyHydrated: false,
+    sceneId: null, scenePromptFill: '', renderer: null, renderedCardIds: new Set(),
   };
+  const Scenes = window.ThisMomentScenes;
+  const DEFAULT_PLACEHOLDER = elements.input.getAttribute('placeholder') || '';
+  const REAL_WEATHER_HINT = elements.environmentSource.textContent;
+  const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const compactLayoutQuery = window.matchMedia('(max-width: 1024px)');
   const narration = new window.NarrationController({
     createAudio: url => new Audio(url),
     isSongPlaying: () => Boolean(playerState.current()) && !elements.audio.paused && !elements.audio.ended,
@@ -53,12 +60,6 @@
       showToast('未收到新推荐，请检查连接后重试。');
     },
   });
-
-  function localInputValue(date = new Date()) {
-    const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-    return shifted.toISOString().slice(0, 16);
-  }
-  elements.time.value = localInputValue();
 
   async function api(url, options = {}) {
     const response = await fetch(url, {
@@ -102,57 +103,176 @@
     return parts.filter(Boolean).join(' · ');
   }
 
+  // ---------- 场景：环境数据 + 背景视觉 ----------
+
+  function sceneList() {
+    if (!state.presets.length) return Scenes.SCENES;
+    // 环境字段以后端预设为准；后端出现前端不认识的 id 时，视觉参数回退到 rain-night。
+    return state.presets.map(preset => ({ ...preset, minute: preset.minute || 0, visual: Scenes.getScene(preset.id).visual }));
+  }
+
+  function currentScene() {
+    const scenes = sceneList();
+    return scenes.find(scene => scene.id === state.sceneId) || scenes.find(scene => scene.id === Scenes.DEFAULT_SCENE_ID) || scenes[0];
+  }
+
+  function sceneLocalTime(scene) {
+    const date = new Date();
+    date.setHours(scene.hour, scene.minute || 0, 0, 0);
+    const offset = -date.getTimezoneOffset();
+    const pad = number => String(Math.abs(number)).padStart(2, '0');
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
+    return `${local}${offset >= 0 ? '+' : '-'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+  }
+
   function environment() {
     const automatic = state.automaticEnvironment;
-    return {
-      city: elements.city.value.trim() || '上海',
-      weather: elements.weather.value,
-      localTime: automatic?.localTime || (elements.time.value ? new Date(elements.time.value).toISOString() : new Date().toISOString()),
-      ...(automatic ? {
+    if (automatic) {
+      return {
+        city: automatic.city || '当前位置',
+        weather: automatic.weather || '未知',
+        localTime: automatic.localTime || new Date().toISOString(),
         temperatureC: automatic.temperatureC,
         apparentTemperatureC: automatic.apparentTemperatureC,
         timezone: automatic.timezone,
         source: 'automatic',
-      } : { source: 'manual' }),
-    };
+      };
+    }
+    const scene = currentScene();
+    return { city: scene.city, weather: scene.weather, localTime: sceneLocalTime(scene), source: 'preset' };
   }
 
-  function weatherGlyph(weather) {
-    return ({ '晴朗': '晴', '多云': '云', '下雨': '雨', '高温': '热', '寒冷': '冷', '雪天': '雪', '未知': '·' })[weather] || weather;
+  function readStoredSceneId() {
+    try { return localStorage.getItem('tm.scene'); } catch (_error) { return null; }
   }
 
-  function updateEnvironmentBrief() {
-    elements.briefCity.textContent = elements.city.value || '上海';
-    elements.briefWeather.textContent = weatherGlyph(elements.weather.value);
-    elements.briefTemperature.textContent = state.automaticEnvironment ? `${Math.round(state.automaticEnvironment.temperatureC)}°` : '';
-    elements.briefTime.textContent = elements.time.value ? elements.time.value.slice(11, 16) : formatTime(new Date());
+  function storeSceneId(id) {
+    try { localStorage.setItem('tm.scene', id); } catch (_error) { /* 隐私模式下不记忆场景。 */ }
   }
 
-  function useManualEnvironment() {
+  function accentSoft(hex, alpha) {
+    const value = /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#38bdf8';
+    const channel = offset => parseInt(value.slice(offset, offset + 2), 16);
+    return `rgba(${channel(1)}, ${channel(3)}, ${channel(5)}, ${alpha})`;
+  }
+
+  function applySceneVisual(scene, { immediate = false } = {}) {
+    const { visual } = scene;
+    const root = document.documentElement.style;
+    root.setProperty('--scene-accent', visual.accent);
+    root.setProperty('--scene-accent-soft', accentSoft(visual.accent, 0.16));
+    root.setProperty('--scene-fallback', visual.fallbackCss);
+    root.setProperty('--panel-alpha', String(visual.panelAlpha));
+    state.renderer?.setScene(visual, { transitionMs: immediate ? 0 : 900 });
+  }
+
+  function clockText(localTime) {
+    const match = String(localTime || '').match(/T(\d{2}:\d{2})/);
+    return match ? match[1] : formatTime(localTime || new Date());
+  }
+
+  function renderSceneState() {
+    const automatic = state.automaticEnvironment;
+    const scene = currentScene();
+    if (automatic) {
+      const parts = [automatic.city || '当前位置', automatic.weather || '未知', clockText(automatic.localTime)];
+      if (Number.isFinite(Number(automatic.temperatureC))) parts.push(`${Math.round(Number(automatic.temperatureC))}°`);
+      elements.sceneEnv.textContent = parts.join(' · ');
+    } else {
+      elements.sceneEnv.textContent = `${scene.city} · ${scene.weather} · ${Scenes.sceneClock(scene)}`;
+    }
+    elements.realWeather.classList.toggle('active', Boolean(automatic));
+    elements.sceneGrid.querySelectorAll('.scene-card').forEach(card => {
+      const active = !automatic && card.dataset.id === scene.id;
+      card.classList.toggle('active', active);
+      card.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  // D2：只在输入框为空（或仍是上一个场景自动填入的示例句）时填入；用户打过字就只换 placeholder。
+  function offerScenePrompt(scene) {
+    const typed = elements.input.value;
+    if (!typed.trim() || typed === state.scenePromptFill) {
+      elements.input.value = scene.prompt;
+      state.scenePromptFill = scene.prompt;
+      elements.input.placeholder = DEFAULT_PLACEHOLDER;
+      resizeComposer();
+    } else {
+      elements.input.placeholder = scene.prompt;
+    }
+  }
+
+  function selectScene(id, { fillPrompt = true, immediate = false, persist = true } = {}) {
+    const scenes = sceneList();
+    const scene = scenes.find(item => item.id === id) || currentScene();
+    state.sceneId = scene.id;
     state.automaticEnvironment = null;
-    elements.environmentSource.textContent = '手动环境';
-    elements.temperature.textContent = '--°';
-    elements.apparentTemperature.textContent = '--°';
-    updateEnvironmentBrief();
+    elements.environmentSource.textContent = REAL_WEATHER_HINT;
+    if (persist) storeSceneId(scene.id);
+    applySceneVisual(scene, { immediate });
+    if (fillPrompt) offerScenePrompt(scene);
+    renderSceneState();
+  }
+
+  function renderSceneGrid() {
+    elements.sceneGrid.replaceChildren(...sceneList().map(scene => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'scene-card';
+      card.dataset.id = scene.id;
+      const thumb = document.createElement('span');
+      thumb.className = 'scene-thumb';
+      thumb.style.backgroundImage = scene.visual.fallbackCss;
+      const copy = document.createElement('span');
+      copy.className = 'scene-card-copy';
+      const name = document.createElement('strong'); name.textContent = scene.label;
+      const meta = document.createElement('small'); meta.textContent = `${scene.city} · ${scene.weather} · ${Scenes.sceneClock(scene)}`;
+      copy.append(name, meta);
+      card.append(thumb, copy);
+      card.addEventListener('click', () => {
+        selectScene(scene.id);
+        if (compactLayoutQuery.matches) setScenePanelOpen(false);
+      });
+      return card;
+    }));
+    renderSceneState();
+  }
+
+  function setScenePanelOpen(open) {
+    elements.scenePanel.hidden = !open;
+    elements.sceneBackdrop.hidden = !open;
+    elements.sceneButton.setAttribute('aria-expanded', String(open));
+  }
+
+  function setImmersive(active) {
+    document.body.classList.toggle('is-immersive', active);
+    elements.immersive.setAttribute('aria-pressed', String(active));
+    elements.immersive.setAttribute('aria-label', active ? '退出沉浸模式' : '沉浸模式');
+    if (active) setScenePanelOpen(false);
   }
 
   function applyAutomaticEnvironment(resolved) {
     state.automaticEnvironment = resolved;
-    elements.city.value = resolved.city || '当前位置';
-    elements.weather.value = resolved.weather || '未知';
-    if (resolved.localTime) elements.time.value = resolved.localTime.slice(0, 16);
-    elements.environmentSource.textContent = '已自动更新';
-    elements.temperature.textContent = `${Math.round(Number(resolved.temperatureC))}°`;
-    elements.apparentTemperature.textContent = `${Math.round(Number(resolved.apparentTemperatureC))}°`;
-    updateEnvironmentBrief();
+    const mappedId = Scenes.sceneIdForWeather(resolved.weather);
+    if (mappedId) {
+      state.sceneId = mappedId;
+      applySceneVisual(currentScene());
+    }
+    const summary = [resolved.city || '当前位置', resolved.weather || '未知'];
+    if (Number.isFinite(Number(resolved.temperatureC))) summary.push(`${Math.round(Number(resolved.temperatureC))}°`);
+    const apparent = Number.isFinite(Number(resolved.apparentTemperatureC)) ? `，体感 ${Math.round(Number(resolved.apparentTemperatureC))}°` : '';
+    elements.environmentSource.textContent = `已用真实天气：${summary.join(' · ')}${apparent}`;
+    renderSceneState();
   }
 
+  // D1：真实天气收在场景面板最后一行，只在用户点击时才请求定位。
   async function resolveAutomaticEnvironment() {
     if (!navigator.geolocation) {
-      elements.environmentSource.textContent = '浏览器不支持定位';
+      elements.environmentSource.textContent = '浏览器不支持定位，继续使用当前场景';
       return;
     }
-    elements.environmentSource.textContent = '正在定位';
+    elements.environmentSource.textContent = '正在定位…';
+    elements.realWeather.disabled = true;
     try {
       const position = await new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, {
         enableHighAccuracy: false, timeout: 6000, maximumAge: 10 * 60 * 1000,
@@ -163,43 +283,22 @@
       });
       applyAutomaticEnvironment(resolved);
     } catch (_error) {
-      elements.environmentSource.textContent = '使用手动环境';
+      elements.environmentSource.textContent = '没拿到真实天气，继续使用当前场景';
+    } finally {
+      elements.realWeather.disabled = false;
     }
   }
 
-  function choosePreset(preset) {
-    if (preset.id === 'random') {
-      const candidates = state.presets.filter(item => item.id !== 'random');
-      preset = candidates[Math.floor(Math.random() * candidates.length)] || preset;
-    }
-    elements.city.value = preset.city;
-    elements.weather.value = preset.weather;
-    const date = new Date();
-    date.setHours(preset.hour, 0, 0, 0);
-    elements.time.value = localInputValue(date);
-    elements.input.value = preset.prompt;
-    useManualEnvironment();
-    document.querySelectorAll('.preset').forEach(button => button.classList.toggle('active', button.dataset.id === preset.id));
-    updateEnvironmentBrief();
-  }
-
-  function renderPresets() {
-    elements.presets.replaceChildren();
-    state.presets.forEach((preset, index) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `preset${index === 0 ? ' active' : ''}`;
-      button.dataset.id = preset.id;
-      const icon = document.createElement('span');
-      icon.className = 'preset-icon';
-      icon.textContent = preset.icon;
-      const label = document.createElement('span');
-      label.className = 'preset-label';
-      label.textContent = preset.label;
-      button.append(icon, label);
-      button.addEventListener('click', () => choosePreset(preset));
-      elements.presets.append(button);
-    });
+  function startSceneRenderer() {
+    const create = window.ThisMomentSceneRenderer?.createSceneRenderer;
+    const fallback = () => { state.renderer = null; elements.sceneCanvas.hidden = true; };
+    state.renderer = create
+      ? create(elements.sceneCanvas, {
+        dprCap: 1, staticFrame: reducedMotionQuery.matches, onContextLost: fallback,
+        onFirstFrame: () => elements.sceneCanvas.classList.add('is-ready'),
+      })
+      : null;
+    if (!state.renderer) fallback();
   }
 
   function progress(event) {
@@ -400,7 +499,12 @@
     const uiState = captureCardUiState(elements.cards);
     const cards = [...state.cards.values()].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
     elements.empty.hidden = cards.length > 0;
-    elements.cards.replaceChildren(...cards.map(createCard));
+    const turns = cards.map(createCard);
+    turns.forEach(turn => {
+      if (!state.hydrating && !state.renderedCardIds.has(turn.dataset.cardId)) turn.classList.add('is-new');
+      state.renderedCardIds.add(turn.dataset.cardId);
+    });
+    elements.cards.replaceChildren(...turns);
     restoreCardUiState(elements.cards, uiState, { onExpanded: syncTrackExpansion });
     updatePlayingRows();
   }
@@ -630,7 +734,6 @@
     }
   });
   document.querySelectorAll('[data-prompt]').forEach(button => button.addEventListener('click', () => { elements.input.value = button.dataset.prompt; elements.input.focus(); }));
-  [elements.city, elements.weather, elements.time].forEach(control => control.addEventListener('change', useManualEnvironment));
   elements.play.addEventListener('click', () => {
     if (!playerState.current()) return showToast('先从音乐卡片选一首歌。');
     if (elements.audio.paused) {
@@ -655,14 +758,17 @@
     elements.seek.value = duration ? String((elements.audio.currentTime / duration) * 100) : '0';
     elements.current.textContent = formatDuration(elements.audio.currentTime * 1000);
     elements.duration.textContent = formatDuration(duration * 1000);
+    syncSeekFill();
   });
   elements.seek.addEventListener('input', () => {
     if (Number.isFinite(elements.audio.duration)) elements.audio.currentTime = elements.audio.duration * (Number(elements.seek.value) / 100);
   });
+  function syncSeekFill() { elements.seek.style.setProperty('--seek-progress', `${Number(elements.seek.value) || 0}%`); }
+  elements.seek.addEventListener('input', syncSeekFill);
+  elements.audio.addEventListener('emptied', () => elements.seek.style.setProperty('--seek-progress', '0%'));
   elements.mute.addEventListener('click', () => { elements.audio.muted = !elements.audio.muted; elements.mute.setAttribute('aria-label', elements.audio.muted ? '取消静音' : '静音'); });
 
   async function initialize() {
-    updateEnvironmentBrief();
     connectSocket();
     const results = await Promise.allSettled([
       api('/api/status'), api('/api/environment-presets'), api(`/api/cards?sessionId=${encodeURIComponent(sessionId)}`),
@@ -670,9 +776,12 @@
     if (results[0].status === 'fulfilled') {
       const status = results[0].value;
       elements.mode.classList.add('live');
-      elements.mode.innerHTML = `<span class="status-dot"></span>${status.mode === 'demo' ? '本地演示音源' : '实时网易云音源'}`;
+      const modeLabel = status.mode === 'demo' ? '本地演示音源' : '实时网易云音源';
+      elements.mode.title = modeLabel;
+      const modeText = elements.mode.querySelector('.sr-only');
+      if (modeText) modeText.textContent = modeLabel;
     }
-    if (results[1].status === 'fulfilled') { state.presets = results[1].value.presets; renderPresets(); }
+    if (results[1].status === 'fulfilled') { state.presets = results[1].value.presets || []; renderSceneGrid(); }
     if (results[2].status === 'fulfilled') {
       reconcileSnapshots(results[2].value.cards);
       state.historyHydrated = true;
@@ -684,13 +793,34 @@
     state.hydrating = false;
     state.queuedSocketEvents.splice(0).forEach(handleSocketEvent);
     if (results.some(result => result.status === 'rejected')) showToast('部分状态暂时未连接，可刷新页面重试。');
-    resolveAutomaticEnvironment();
   }
 
   document.addEventListener('click', event => {
-    const disclosure = $('#environmentPanel');
-    if (disclosure?.open && !disclosure.contains(event.target)) disclosure.open = false;
+    if (elements.scenePanel.hidden) return;
+    if (elements.scenePanel.contains(event.target) || elements.sceneButton.contains(event.target)) return;
+    setScenePanelOpen(false);
   });
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    if (!elements.scenePanel.hidden) { setScenePanelOpen(false); elements.sceneButton.focus(); }
+    else if (document.body.classList.contains('is-immersive')) setImmersive(false);
+  });
+  elements.sceneButton.addEventListener('click', () => setScenePanelOpen(elements.scenePanel.hidden));
+  elements.randomScene.addEventListener('click', () => selectScene(Scenes.pickRandomScene(state.sceneId).id));
+  elements.immersive.addEventListener('click', () => setImmersive(!document.body.classList.contains('is-immersive')));
+  elements.scrollTop.addEventListener('click', () => {
+    elements.feed.scrollTo({ top: 0, behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
+  });
+  elements.realWeather.addEventListener('click', resolveAutomaticEnvironment);
+  window.addEventListener('pointermove', event => {
+    state.renderer?.setPointer(event.clientX / window.innerWidth, event.clientY / window.innerHeight, true);
+  }, { passive: true });
+  ['pointerleave', 'pointercancel', 'blur'].forEach(type => window.addEventListener(type, () => state.renderer?.setPointer(0, 0, false)));
+  document.documentElement.addEventListener('pointerleave', () => state.renderer?.setPointer(0, 0, false));
+
+  startSceneRenderer();
+  renderSceneGrid();
+  selectScene(readStoredSceneId() || Scenes.DEFAULT_SCENE_ID, { fillPrompt: false, immediate: true, persist: false });
   resizeComposer();
   initialize();
 }());

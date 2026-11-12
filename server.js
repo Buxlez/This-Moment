@@ -18,12 +18,12 @@ const PUBLIC_TTS_ERROR = '推荐语音暂不可用，可稍后重试。';
 const PUBLIC_GENERATION_ERROR = '生成失败，请稍后重试。';
 
 const PRESETS = [
-  { id: 'shanghai-morning', label: '上海·晴朗早晨', icon: '☀︎', city: '上海', weather: '晴朗', hour: 8, prompt: '上班路上有点困，想提神但别太吵' },
-  { id: 'shenzhen-rain', label: '深圳·雨夜回家', icon: '☲', city: '深圳', weather: '下雨', hour: 21, prompt: '坐车回家有点累，想听点舒服但别太伤感的歌' },
-  { id: 'suzhou-drive', label: '苏州·长途驾驶', icon: '→', city: '苏州', weather: '晴朗', hour: 15, prompt: '高速上还要开很久，想听点有精神但别太炸的歌' },
-  { id: 'xiamen-weekend', label: '厦门·周末上午', icon: '◌', city: '厦门', weather: '晴朗', hour: 10, prompt: '周末开车出去玩，想听点轻松、有公路感的歌' },
-  { id: 'shenzhen-night', label: '深圳·城市夜景', icon: '◐', city: '深圳', weather: '晴朗', hour: 22, prompt: '坐车看夜景，想听点有氛围但别太吵的歌' },
-  { id: 'random', label: '随机一刻', icon: '✦', city: '上海', weather: '多云', hour: 17, prompt: '来点音乐' },
+  { id: 'rain-night', label: '雨夜·回家路上', icon: '☂', city: '深圳', weather: '下雨', hour: 21, minute: 0, prompt: '坐车回家有点累，想听点舒服但别太伤感的歌' },
+  { id: 'clear-morning', label: '晴·早高峰', icon: '☀︎', city: '上海', weather: '晴朗', hour: 8, minute: 0, prompt: '上班路上有点困，想提神但别太吵' },
+  { id: 'cloudy-dusk', label: '多云·傍晚', icon: '☁︎', city: '杭州', weather: '多云', hour: 17, minute: 30, prompt: '下班前的一点空档，想听点松弛的歌' },
+  { id: 'heat-highway', label: '高温·午后高速', icon: '→', city: '苏州', weather: '高温', hour: 14, minute: 0, prompt: '高速上还要开很久，想听点有精神但别太炸的歌' },
+  { id: 'snow-night', label: '雪夜·安静街道', icon: '❄︎', city: '北京', weather: '雪天', hour: 22, minute: 0, prompt: '下雪的晚上，想听点安静又温暖的' },
+  { id: 'cold-dawn', label: '寒冷·起雾清晨', icon: '◌', city: '哈尔滨', weather: '寒冷', hour: 6, minute: 30, prompt: '很冷的早上，车里刚热起来，想慢慢醒过来' },
 ];
 
 function bool(value, fallback) {
@@ -31,9 +31,9 @@ function bool(value, fallback) {
   return /^(1|true|yes|on)$/i.test(String(value));
 }
 
-function localTimeForHour(hour) {
+function localTimeForHour(hour, minute = 0) {
   const date = new Date();
-  date.setHours(hour, 0, 0, 0);
+  date.setHours(hour, minute, 0, 0);
   const offset = -date.getTimezoneOffset();
   const sign = offset >= 0 ? '+' : '-';
   const pad = number => String(Math.abs(number)).padStart(2, '0');
@@ -128,7 +128,7 @@ function createApp(overrides = {}) {
   });
 
   app.get('/api/environment-presets', (_req, res) => {
-    res.json({ presets: PRESETS.map(preset => ({ ...preset, localTime: localTimeForHour(preset.hour) })) });
+    res.json({ presets: PRESETS.map(preset => ({ ...preset, localTime: localTimeForHour(preset.hour, preset.minute) })) });
   });
 
   app.post('/api/environment/resolve', async (req, res) => {

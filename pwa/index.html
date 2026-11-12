@@ -3,67 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#f8f4f8">
+  <meta name="theme-color" content="#060b12">
   <meta name="description" content="this moment，根据此刻环境和自然语言生成音乐推荐。">
   <title>this moment · 此刻的音乐</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23675af4'/%3E%3Cpath d='M10 20V12m4 11V9m4 12V11m4 7v-4' stroke='%23faf7fb' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%230a1722'/%3E%3Cpath d='M10 20V12m4 11V9m4 12V11m4 7v-4' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="site-header" id="top">
-    <a class="brand" href="#conversationFeed" aria-label="this moment 首页">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-      <span class="brand-copy"><strong>this moment</strong><small>AI MUSIC EDITOR</small></span>
-    </a>
+  <canvas class="scene-canvas" id="sceneCanvas" aria-hidden="true"></canvas>
 
-    <div class="header-tools">
-      <span class="mode-pill" id="modePill"><span class="status-dot"></span>正在连接</span>
-      <details class="environment-disclosure" id="environmentPanel">
-        <summary class="environment-brief" id="environmentBrief">
-          <span class="weather-orb" id="briefWeather">晴</span>
-          <span class="environment-summary"><strong id="briefCity">上海</strong><small id="briefTemperature"></small><small id="briefTime">08:20</small></span>
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
-        </summary>
-        <div class="environment-popover">
-          <div class="popover-heading">
-            <div><small>当前环境</small><strong>调整这一刻的背景</strong></div>
-            <span id="environmentSource">正在定位</span>
-          </div>
-          <div class="environment-fields">
-            <label>城市<input id="cityInput" type="text" maxlength="30" value="上海" autocomplete="address-level2"></label>
-            <label>天气
-              <select id="weatherInput">
-                <option>晴朗</option><option>多云</option><option>下雨</option><option>高温</option><option>寒冷</option><option>雪天</option><option>未知</option>
-              </select>
-            </label>
-            <label>当地时间<input id="timeInput" type="datetime-local"></label>
-          </div>
-          <div class="environment-readout" aria-live="polite">
-            <span>当前温度 <strong id="temperatureValue">--°</strong></span>
-            <span>体感 <strong id="apparentTemperatureValue">--°</strong></span>
-          </div>
-          <p class="environment-note">允许定位后会自动读取当前天气；精确坐标只用于即时查询，不会写入推荐记录。输入中明确说出的城市或天气仍会优先。</p>
-          <div class="presets" id="presetList" aria-label="环境预设"></div>
-        </div>
-      </details>
-    </div>
-  </header>
+  <main class="glass-panel" id="glassPanel">
+    <header class="panel-header" id="top">
+      <h1 class="panel-title" id="pageTitle">THIS MOMENT</h1>
+      <p class="panel-status">
+        <span class="mode-pill" id="modePill" title="正在连接"><span class="status-dot"></span><span class="sr-only">正在连接</span></span>
+        <span class="scene-env" id="sceneEnv" aria-live="polite">深圳 · 下雨 · 21:00</span>
+      </p>
+    </header>
 
-  <main class="conversation-shell">
-    <section class="conversation-intro" aria-labelledby="pageTitle">
-      <span class="intro-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-      <div>
-        <p>AI 推荐</p>
-        <h1 id="pageTitle">把此刻，翻译成一组歌</h1>
-        <span>说感受、场景或你想要的状态，一句话就够了。</span>
-      </div>
-    </section>
-
-    <section class="conversation-feed" id="conversationFeed" aria-label="音乐推荐对话">
+    <section class="conversation-feed" id="conversationFeed" aria-label="音乐推荐对话" tabindex="-1">
       <div class="empty-state" id="emptyState">
+        <!-- 空状态文案集中在这里维护（改版文档 3.1 节） -->
         <div class="empty-copy">
           <p>从一句模糊的想法开始</p>
-          <span>时间与天气只是背景，你的原话永远最重要。</span>
+          <span>窗外的天气和时间只作参考，你说的那句话才算数。</span>
         </div>
         <div class="prompt-chips" aria-label="示例输入">
           <button type="button" data-prompt="上班路上有点困，想提神但别太吵">提神，但别太吵</button>
@@ -94,56 +57,85 @@
         </div>
       </section>
     </section>
-  </main>
 
-  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="composer-dock" id="composerDock">
+      <form class="composer" id="recommendationForm">
+        <label class="sr-only" for="momentInput">描述你此刻想听的音乐</label>
+        <textarea id="momentInput" maxlength="500" rows="1" placeholder="说说此刻的感受和想听的风格吧" required></textarea>
+        <button class="send-button" id="sendButton" type="submit" aria-label="生成音乐推荐">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5M5.5 9.5 10 5l4.5 4.5"/></svg>
+        </button>
+      </form>
 
-  <div class="composer-dock" id="composerDock">
-    <aside class="player-shell is-empty" id="playerShell" aria-label="全局播放器">
-      <div class="player-track">
-        <div class="player-cover" id="playerCover" aria-hidden="true"><span>tm</span></div>
-        <div class="player-track-copy">
-          <strong id="playerTitle">还没有播放音乐</strong>
-          <span id="playerArtist">从一张卡片开始</span>
-        </div>
-      </div>
-      <div class="player-main">
-        <div class="player-controls">
-          <button id="previousButton" type="button" aria-label="上一首"><svg viewBox="0 0 20 20"><path d="M5 4v12M15 5l-7 5 7 5z"/></svg></button>
-          <button class="player-play" id="playButton" type="button" aria-label="播放">
-            <svg class="icon-play" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
-            <svg class="icon-pause" viewBox="0 0 20 20"><path d="M6 5h3v10H6zM11 5h3v10h-3z"/></svg>
-          </button>
-          <button id="nextButton" type="button" aria-label="下一首"><svg viewBox="0 0 20 20"><path d="M15 4v12M5 5l7 5-7 5z"/></svg></button>
+      <aside class="player-shell is-empty" id="playerShell" aria-label="全局播放器">
+        <div class="player-track">
+          <div class="player-cover" id="playerCover" aria-hidden="true"><span>tm</span></div>
+          <div class="player-track-copy">
+            <strong id="playerTitle">还没有播放音乐</strong>
+            <span id="playerArtist">从一张卡片开始</span>
+          </div>
+          <div class="player-controls">
+            <button id="previousButton" type="button" aria-label="上一首"><svg viewBox="0 0 20 20"><path d="M5 4v12M15 5l-7 5 7 5z"/></svg></button>
+            <button class="player-play" id="playButton" type="button" aria-label="播放">
+              <svg class="icon-play" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
+              <svg class="icon-pause" viewBox="0 0 20 20"><path d="M6 5h3v10H6zM11 5h3v10h-3z"/></svg>
+            </button>
+            <button id="nextButton" type="button" aria-label="下一首"><svg viewBox="0 0 20 20"><path d="M15 4v12M5 5l7 5-7 5z"/></svg></button>
+          </div>
         </div>
         <div class="player-timeline">
           <span id="currentTime">0:00</span>
           <input id="seekInput" type="range" min="0" max="100" value="0" aria-label="播放进度">
           <span id="durationTime">0:00</span>
         </div>
-      </div>
-      <div class="player-side">
-        <span id="queuePosition">0 / 0</span>
-        <button id="muteButton" type="button" aria-label="静音"><svg viewBox="0 0 20 20"><path d="M3 8h3l4-3v10l-4-3H3zM13 7c1 1 1 5 0 6M15 5c3 3 3 7 0 10"/></svg></button>
-      </div>
-      <audio id="audio" preload="metadata"></audio>
-    </aside>
+        <div class="player-side">
+          <span id="queuePosition">0 / 0</span>
+          <button id="muteButton" type="button" aria-label="静音"><svg viewBox="0 0 20 20"><path d="M3 8h3l4-3v10l-4-3H3zM13 7c1 1 1 5 0 6M15 5c3 3 3 7 0 10"/></svg></button>
+        </div>
+        <audio id="audio" preload="metadata"></audio>
+      </aside>
 
-    <form class="composer" id="recommendationForm">
-      <label class="sr-only" for="momentInput">描述你此刻想听的音乐</label>
-      <textarea id="momentInput" maxlength="500" rows="1" placeholder="说说此刻的感受和想听的风格吧" required></textarea>
-      <button class="send-button" id="sendButton" type="submit" aria-label="生成音乐推荐">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 15V5M5.5 9.5 10 5l4.5 4.5"/></svg>
-      </button>
-    </form>
-    <div class="dock-meta">
-      <span>内容由 AI 生成，歌曲播放以音源状态为准</span>
+      <div class="dock-meta">
+        <span>内容由 AI 生成，歌曲播放以音源状态为准</span>
+      </div>
     </div>
-  </div>
+  </main>
+
+  <nav class="side-rail" id="sideRail" aria-label="场景与视图">
+    <button class="rail-button" id="scrollTopButton" type="button" aria-label="回到对话顶部" title="回到对话顶部">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 10v9h11v-9"/></svg>
+    </button>
+    <button class="rail-button" id="sceneButton" type="button" aria-label="选择场景" title="选择场景" aria-haspopup="dialog" aria-expanded="false" aria-controls="scenePanel">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.5"/></svg>
+    </button>
+    <button class="rail-button" id="randomSceneButton" type="button" aria-label="随机切换场景" title="随机切换场景">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5"/><circle class="pip" cx="9" cy="9" r="1"/><circle class="pip" cx="15" cy="9" r="1"/><circle class="pip" cx="12" cy="12" r="1"/><circle class="pip" cx="9" cy="15" r="1"/><circle class="pip" cx="15" cy="15" r="1"/></svg>
+    </button>
+    <button class="rail-button" id="immersiveButton" type="button" aria-label="沉浸模式" title="沉浸模式" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><path class="fill" d="M12 4.5a7.5 7.5 0 0 0 0 15z"/></svg>
+    </button>
+  </nav>
+
+  <div class="scene-backdrop" id="sceneBackdrop" hidden></div>
+  <section class="scene-popover" id="scenePanel" role="dialog" aria-label="选择场景" hidden>
+    <div class="scene-popover-heading">
+      <strong>换一扇车窗</strong>
+      <span>场景只改变参考的天气和时间</span>
+    </div>
+    <div class="scene-grid" id="sceneGrid"></div>
+    <div class="scene-real">
+      <button class="scene-real-button" id="realWeatherButton" type="button">用此刻真实天气</button>
+      <span class="scene-real-status" id="environmentSource" aria-live="polite">定位只用于即时查询，不会写入推荐记录</span>
+    </div>
+  </section>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="/player.js"></script>
   <script src="/narration.js"></script>
   <script src="/app-model.js"></script>
+  <script src="/scenes.js"></script>
+  <script src="/scene-renderer.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

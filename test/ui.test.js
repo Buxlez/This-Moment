@@ -22,7 +22,10 @@ test('desktop UI is structured as an accessible card conversation', () => {
 
   assert.match(html, /id="conversationFeed"/);
   assert.match(html, /class="composer-dock"/);
-  assert.match(html, /<details[^>]*class="environment-disclosure"/);
+  assert.match(html, /<main[^>]*class="glass-panel"/);
+  assert.match(html, /<canvas[^>]*id="sceneCanvas"/);
+  assert.match(html, /class="side-rail"/);
+  assert.doesNotMatch(html, /conversation-intro|environment-disclosure/);
   assert.match(html, /id="progressPanel"[^>]*aria-live="polite"/);
   assert.match(html, /id="momentInput"[^>]*maxlength="500"/);
   assert.doesNotMatch(html, /class="opening"/);
@@ -40,22 +43,53 @@ test('conversation cards expose artwork, user prompts, rationale and playback st
   assert.match(app, /dataset\.userPrompt/);
 });
 
-test('environment UI attempts private automatic weather and keeps manual fallback', () => {
+test('environment UI is a scene picker with a tucked-away real weather entry', () => {
   const html = read('pwa/index.html');
   const app = read('pwa/app.js');
+  const initialize = app.slice(app.indexOf('async function initialize()'), app.indexOf("document.addEventListener('click'"));
 
+  assert.match(html, /id="scenePanel"[^>]*hidden/);
+  assert.match(html, /id="sceneGrid"/);
+  assert.match(html, /id="randomSceneButton"/);
+  assert.match(html, /id="immersiveButton"/);
+  assert.match(html, /id="realWeatherButton"/);
   assert.match(html, /id="environmentSource"/);
-  assert.match(html, /id="temperatureValue"/);
+  assert.doesNotMatch(html, /id="(cityInput|weatherInput|timeInput|presetList)"/);
   assert.match(app, /navigator\.geolocation/);
   assert.match(app, /\/api\/environment\/resolve/);
   assert.match(app, /apparentTemperatureC/);
-  assert.match(app, /source:\s*['"]manual['"]/);
+  assert.match(app, /source:\s*['"]preset['"]/);
+  assert.match(app, /source:\s*['"]automatic['"]/);
+  assert.match(app, /elements\.realWeather\.addEventListener\(['"]click['"], resolveAutomaticEnvironment\)/);
+  assert.doesNotMatch(initialize, /resolveAutomaticEnvironment/);
+  assert.match(app, /pickRandomScene\(state\.sceneId\)/);
+  assert.match(app, /localStorage\.getItem\(['"]tm\.scene['"]\)/);
+  assert.match(app, /localStorage\.setItem\(['"]tm\.scene['"]/);
+  assert.match(app, /setProperty\(['"]--scene-accent['"]/);
+  assert.match(app, /setProperty\(['"]--scene-accent-soft['"]/);
+});
+
+test('empty state copy lives in the markup and the old intro is gone', () => {
+  const html = read('pwa/index.html');
+  const app = read('pwa/app.js');
+
+  assert.match(html, /从一句模糊的想法开始/);
+  assert.match(html, /窗外的天气和时间只作参考，你说的那句话才算数。/);
+  assert.match(html, /placeholder="说说此刻的感受和想听的风格吧"/);
+  assert.doesNotMatch(html, /把此刻，翻译成一组歌/);
+  assert.doesNotMatch(app, /窗外的天气和时间/);
 });
 
 test('visual layer defines tokens, desktop conversation and focus affordances', () => {
   const css = read('pwa/styles.css');
 
   assert.match(css, /--accent-violet:/);
+  assert.match(css, /--scene-accent:/);
+  assert.match(css, /\.glass-panel/);
+  assert.match(css, /backdrop-filter:\s*blur\(18px\)/);
+  assert.match(css, /@supports/);
+  assert.match(css, /prefers-reduced-motion/);
+  assert.doesNotMatch(css, /serif(?<!sans-serif)/);
   assert.match(css, /--card-radius:/);
   assert.match(css, /\.conversation-feed/);
   assert.match(css, /\.message-user/);
@@ -65,11 +99,13 @@ test('visual layer defines tokens, desktop conversation and focus affordances', 
   assert.match(css, /@media \(max-width: 1024px\)/);
 });
 
-test('frontend loads player, narration, then application scripts', () => {
+test('frontend loads player, narration, scene modules, then application scripts', () => {
   const html = read('pwa/index.html');
-  const scripts = [...html.matchAll(/<script src="\/(player|narration|app-model|app)\.js"><\/script>/g)].map(match => match[1]);
+  const scripts = [...html.matchAll(/<script src="\/([\w-]+)\.js"><\/script>/g)].map(match => match[1]);
 
-  assert.deepEqual(scripts, ['player', 'narration', 'app-model', 'app']);
+  assert.deepEqual(scripts, ['player', 'narration', 'app-model', 'scenes', 'scene-renderer', 'app']);
+  assert.ok(fs.existsSync(path.join(root, 'pwa/scene-renderer.js')));
+  assert.ok(html.indexOf('id="sceneCanvas"') < html.indexOf('<script'));
 });
 
 test('track resolution is abortable and every asynchronous mutation is ownership-gated', () => {
