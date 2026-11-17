@@ -50,7 +50,9 @@ test('environment UI is a scene picker with a tucked-away real weather entry', (
 
   assert.match(html, /id="scenePanel"[^>]*hidden/);
   assert.match(html, /id="sceneGrid"/);
-  assert.match(html, /id="randomSceneButton"/);
+  assert.match(html, /id="newConversationButton"/);
+  assert.doesNotMatch(html, /id="(randomSceneButton|scrollTopButton)"/);
+  assert.equal((html.match(/class="rail-button[ "]/g) || []).length, 3);
   assert.match(html, /id="immersiveButton"/);
   assert.match(html, /id="realWeatherButton"/);
   assert.match(html, /id="environmentSource"/);
@@ -62,7 +64,9 @@ test('environment UI is a scene picker with a tucked-away real weather entry', (
   assert.match(app, /source:\s*['"]automatic['"]/);
   assert.match(app, /elements\.realWeather\.addEventListener\(['"]click['"], resolveAutomaticEnvironment\)/);
   assert.doesNotMatch(initialize, /resolveAutomaticEnvironment/);
-  assert.match(app, /pickRandomScene\(state\.sceneId\)/);
+  assert.match(app, /elements\.newConversation\.addEventListener\(['"]click['"], startNewConversation\)/);
+  assert.match(app, /function startNewConversation\(\)\s*\{[\s\S]*sessionId = crypto\.randomUUID\(\)[\s\S]*state\.cards\.clear\(\)[\s\S]*renderCards\(\)/);
+  assert.match(app, /if \(state\.socket === socket\) setTimeout\(connectSocket, 1800\)/);
   assert.match(app, /localStorage\.getItem\(['"]tm\.scene['"]\)/);
   assert.match(app, /localStorage\.setItem\(['"]tm\.scene['"]/);
   assert.match(app, /setProperty\(['"]--scene-accent['"]/);

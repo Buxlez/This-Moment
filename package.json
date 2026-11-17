@@ -11,6 +11,10 @@
     "netease:login": "node scripts/netease-login.js"
   },
   "dependencies": {
+    "@astryxdesign/cli": "^0.4.7",
+    "@astryxdesign/core": "^0.4.7",
+    "@astryxdesign/theme-neutral": "^0.4.7",
+    "@stylexjs/stylex": "^0.19.0",
     "better-sqlite3": "^12.10.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",

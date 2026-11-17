@@ -30,3 +30,7 @@ skills/netease-music/data/*
 data/
 cache/
 output/
+
+# Word docs and Office lock files
+*.docx
+~$*

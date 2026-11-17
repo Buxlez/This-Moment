@@ -12,6 +12,7 @@
 <body>
   <canvas class="scene-canvas" id="sceneCanvas" aria-hidden="true"></canvas>
 
+  <div class="stage" id="stage">
   <main class="glass-panel" id="glassPanel">
     <header class="panel-header" id="top">
       <h1 class="panel-title" id="pageTitle">THIS MOMENT</h1>
@@ -67,33 +68,6 @@
         </button>
       </form>
 
-      <aside class="player-shell is-empty" id="playerShell" aria-label="全局播放器">
-        <div class="player-track">
-          <div class="player-cover" id="playerCover" aria-hidden="true"><span>tm</span></div>
-          <div class="player-track-copy">
-            <strong id="playerTitle">还没有播放音乐</strong>
-            <span id="playerArtist">从一张卡片开始</span>
-          </div>
-          <div class="player-controls">
-            <button id="previousButton" type="button" aria-label="上一首"><svg viewBox="0 0 20 20"><path d="M5 4v12M15 5l-7 5 7 5z"/></svg></button>
-            <button class="player-play" id="playButton" type="button" aria-label="播放">
-              <svg class="icon-play" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
-              <svg class="icon-pause" viewBox="0 0 20 20"><path d="M6 5h3v10H6zM11 5h3v10h-3z"/></svg>
-            </button>
-            <button id="nextButton" type="button" aria-label="下一首"><svg viewBox="0 0 20 20"><path d="M15 4v12M5 5l7 5-7 5z"/></svg></button>
-          </div>
-        </div>
-        <div class="player-timeline">
-          <span id="currentTime">0:00</span>
-          <input id="seekInput" type="range" min="0" max="100" value="0" aria-label="播放进度">
-          <span id="durationTime">0:00</span>
-        </div>
-        <div class="player-side">
-          <span id="queuePosition">0 / 0</span>
-          <button id="muteButton" type="button" aria-label="静音"><svg viewBox="0 0 20 20"><path d="M3 8h3l4-3v10l-4-3H3zM13 7c1 1 1 5 0 6M15 5c3 3 3 7 0 10"/></svg></button>
-        </div>
-        <audio id="audio" preload="metadata"></audio>
-      </aside>
 
       <div class="dock-meta">
         <span>内容由 AI 生成，歌曲播放以音源状态为准</span>
@@ -101,18 +75,45 @@
     </div>
   </main>
 
-  <nav class="side-rail" id="sideRail" aria-label="场景与视图">
-    <button class="rail-button" id="scrollTopButton" type="button" aria-label="回到对话顶部" title="回到对话顶部">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 11.5 12 5l8 6.5M6.5 10v9h11v-9"/></svg>
+    <aside class="player-shell is-empty" id="playerShell" aria-label="全局播放器">
+      <div class="player-track">
+        <div class="player-cover" id="playerCover" aria-hidden="true"><span>tm</span></div>
+        <div class="player-track-copy">
+          <strong id="playerTitle">还没有播放音乐</strong>
+          <span id="playerArtist">从一张卡片开始</span>
+        </div>
+        <div class="player-controls">
+          <button id="previousButton" type="button" aria-label="上一首"><svg viewBox="0 0 20 20"><path d="M5 4v12M15 5l-7 5 7 5z"/></svg></button>
+          <button class="player-play" id="playButton" type="button" aria-label="播放">
+            <svg class="icon-play" viewBox="0 0 20 20"><path d="m7 5 8 5-8 5z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 20 20"><path d="M6 5h3v10H6zM11 5h3v10h-3z"/></svg>
+          </button>
+          <button id="nextButton" type="button" aria-label="下一首"><svg viewBox="0 0 20 20"><path d="M15 4v12M5 5l7 5-7 5z"/></svg></button>
+        </div>
+      </div>
+      <div class="player-timeline">
+        <span id="currentTime">0:00</span>
+        <input id="seekInput" type="range" min="0" max="100" value="0" aria-label="播放进度">
+        <span id="durationTime">0:00</span>
+      </div>
+      <div class="player-side">
+        <span id="queuePosition">0 / 0</span>
+        <button id="muteButton" type="button" aria-label="静音"><svg viewBox="0 0 20 20"><path d="M3 8h3l4-3v10l-4-3H3zM13 7c1 1 1 5 0 6M15 5c3 3 3 7 0 10"/></svg></button>
+      </div>
+      <audio id="audio" preload="metadata"></audio>
+    </aside>
+  </div>
+
+  <nav class="side-rail" id="sideRail" aria-label="对话与场景">
+    <button class="rail-button rail-button-primary" id="newConversationButton" type="button" aria-label="新建对话" title="新建对话">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13"/></svg>
     </button>
+    <span class="rail-divider" aria-hidden="true"></span>
     <button class="rail-button" id="sceneButton" type="button" aria-label="选择场景" title="选择场景" aria-haspopup="dialog" aria-expanded="false" aria-controls="scenePanel">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><circle cx="12" cy="12" r="2.5"/></svg>
     </button>
-    <button class="rail-button" id="randomSceneButton" type="button" aria-label="随机切换场景" title="随机切换场景">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2.5"/><circle class="pip" cx="9" cy="9" r="1"/><circle class="pip" cx="15" cy="9" r="1"/><circle class="pip" cx="12" cy="12" r="1"/><circle class="pip" cx="9" cy="15" r="1"/><circle class="pip" cx="15" cy="15" r="1"/></svg>
-    </button>
-    <button class="rail-button" id="immersiveButton" type="button" aria-label="沉浸模式" title="沉浸模式" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5"/><path class="fill" d="M12 4.5a7.5 7.5 0 0 0 0 15z"/></svg>
+    <button class="rail-button" id="immersiveButton" type="button" aria-label="隐藏窗口" title="隐藏窗口" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.3-6 9-6 9 6 9 6-3.3 6-9 6-9-6-9-6z"/><circle cx="12" cy="12" r="2.6"/><path class="slash" d="M5 5l14 14"/></svg>
     </button>
   </nav>
 

@@ -14,7 +14,7 @@
     form: $('#recommendationForm'), input: $('#momentInput'), send: $('#sendButton'),
     feed: $('#conversationFeed'), sceneCanvas: $('#sceneCanvas'), sceneEnv: $('#sceneEnv'),
     scenePanel: $('#scenePanel'), sceneBackdrop: $('#sceneBackdrop'), sceneGrid: $('#sceneGrid'),
-    sceneButton: $('#sceneButton'), randomScene: $('#randomSceneButton'), immersive: $('#immersiveButton'), scrollTop: $('#scrollTopButton'),
+    sceneButton: $('#sceneButton'), immersive: $('#immersiveButton'), newConversation: $('#newConversationButton'),
     realWeather: $('#realWeatherButton'), environmentSource: $('#environmentSource'),
     mode: $('#modePill'), progress: $('#progressPanel'), progressTitle: $('#progressTitle'), progressNumber: $('#progressNumber'), progressBar: $('#progressBar'),
     pendingMessage: $('#pendingUserMessage'), pendingMeta: $('#pendingMessageMeta'),
@@ -25,7 +25,7 @@
   const playerState = new window.ThisMomentPlayer.PlayerState();
   const selectionGate = new RequestGate();
   const ttsState = new TtsState();
-  const sessionId = localStorage.getItem('thisMoment.sessionId') || crypto.randomUUID();
+  let sessionId = localStorage.getItem('thisMoment.sessionId') || crypto.randomUUID();
   localStorage.setItem('thisMoment.sessionId', sessionId);
   const state = {
     cards: new Map(), presets: [], generating: false, socket: null, toastTimer: null,
@@ -247,7 +247,8 @@
   function setImmersive(active) {
     document.body.classList.toggle('is-immersive', active);
     elements.immersive.setAttribute('aria-pressed', String(active));
-    elements.immersive.setAttribute('aria-label', active ? '退出沉浸模式' : '沉浸模式');
+    elements.immersive.setAttribute('aria-label', active ? '显示窗口' : '隐藏窗口');
+    elements.immersive.title = active ? '显示窗口' : '隐藏窗口';
     if (active) setScenePanelOpen(false);
   }
 
@@ -616,12 +617,13 @@
     state.socket = socket;
     socket.addEventListener('message', message => {
       try {
+        if (state.socket !== socket) return;   // 已经开了新对话，旧会话的事件不再处理
         const event = JSON.parse(message.data);
         if (state.hydrating) state.queuedSocketEvents.push(event);
         else handleSocketEvent(event);
       } catch { /* Ignore malformed events. */ }
     });
-    socket.addEventListener('close', () => setTimeout(connectSocket, 1800));
+    socket.addEventListener('close', () => { if (state.socket === socket) setTimeout(connectSocket, 1800); });
   }
 
   async function retryTts(card) {
@@ -727,6 +729,7 @@
 
   elements.form.addEventListener('submit', event => { event.preventDefault(); submitPrompt(); });
   elements.input.addEventListener('input', resizeComposer);
+  window.addEventListener('resize', resizeComposer);
   elements.input.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -768,6 +771,34 @@
   elements.audio.addEventListener('emptied', () => elements.seek.style.setProperty('--seek-progress', '0%'));
   elements.mute.addEventListener('click', () => { elements.audio.muted = !elements.audio.muted; elements.mute.setAttribute('aria-label', elements.audio.muted ? '取消静音' : '静音'); });
 
+  // 新建对话：换一个会话 id，清空当前对话流；正在播放的歌不打断，旧对话留在服务端但界面不再显示。
+  function startNewConversation() {
+    generationPoller.cancel();
+    narration.stop();
+    narration.setLatestCardId(null);
+    state.generating = false;
+    state.pendingEnvironment = null;
+    elements.send.disabled = false;
+    elements.progress.hidden = true;
+    sessionId = crypto.randomUUID();
+    localStorage.setItem('thisMoment.sessionId', sessionId);
+    state.cards.clear();
+    state.renderedCardIds.clear();
+    state.queuedSocketEvents.length = 0;
+    state.historyHydrated = true;
+    const previousSocket = state.socket;
+    connectSocket();
+    previousSocket?.close();
+    renderCards();
+    elements.input.value = '';
+    state.scenePromptFill = '';
+    elements.input.placeholder = DEFAULT_PLACEHOLDER;
+    resizeComposer();
+    elements.feed.scrollTop = 0;
+    setScenePanelOpen(false);
+    elements.input.focus();
+  }
+
   async function initialize() {
     connectSocket();
     const results = await Promise.allSettled([
@@ -806,11 +837,8 @@
     else if (document.body.classList.contains('is-immersive')) setImmersive(false);
   });
   elements.sceneButton.addEventListener('click', () => setScenePanelOpen(elements.scenePanel.hidden));
-  elements.randomScene.addEventListener('click', () => selectScene(Scenes.pickRandomScene(state.sceneId).id));
   elements.immersive.addEventListener('click', () => setImmersive(!document.body.classList.contains('is-immersive')));
-  elements.scrollTop.addEventListener('click', () => {
-    elements.feed.scrollTo({ top: 0, behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
-  });
+  elements.newConversation.addEventListener('click', startNewConversation);
   elements.realWeather.addEventListener('click', resolveAutomaticEnvironment);
   window.addEventListener('pointermove', event => {
     state.renderer?.setPointer(event.clientX / window.innerWidth, event.clientY / window.innerHeight, true);
