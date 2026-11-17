@@ -74,8 +74,12 @@ npm test
 - `pwa/`：无构建步骤的响应式单页界面和 `HTMLAudioElement` 播放器。
 - `user/taste.md` 与 `user/mood-rules.md`：只读演示配置。
 
-## 来源与边界
+## 致谢
 
-本 Demo 以 [bingyanglu/Claudio-FM](https://github.com/bingyanglu/Claudio-FM) `v1.1.1` 的代码形态为技术起点，锁定提交为 `4939b1adc5ddc5ed1289a1e93cd0235b98634abe`，并保留了上游 Git 历史。
+感谢 [@bingyanglu](https://github.com/bingyanglu) 开源的 [Claudio-FM](https://github.com/bingyanglu/Claudio-FM)。This Moment 是在 Claudio-FM `v1.1.1`（提交 `4939b1a`）的基础上二次开发的，沿用了它的整体思路：先拼出个人画像和当下情境，再交给大模型推荐歌曲，最后接到网易云播放。这为这个原型省下了大量从零搭建的时间。仓库里保留了上游的 Git 历史，原作者的每一次提交都可以在这里查到。
 
-截至该锁定版本，上游仓库未提供明确 LICENSE。本改造仅用于本地内部原型验证，不代表已获得公开发布、部署或商业使用授权。在对外演示、分发、部署或商业化前，必须先取得作者许可，或替换来源代码。音乐播放能力同样只用于本地原型验证。
+在此基础上，This Moment 增加了天气情境、推荐卡片、卡片播放器、语音播报推荐语和新的前端界面。
+
+## 使用边界
+
+截至上述版本，上游仓库未提供明确 LICENSE。本改造仅用于本地内部原型验证，不代表已获得公开发布、部署或商业使用授权。在对外演示、分发、部署或商业化前，必须先取得作者许可，或替换来源代码。音乐播放能力同样只用于本地原型验证。
